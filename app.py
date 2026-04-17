@@ -3,7 +3,7 @@ from openai import OpenAI
 import re
 import core
 
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+DEFAULT_MODEL = st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
 
 # -----------------------------
 # App Config
