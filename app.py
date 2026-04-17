@@ -17,13 +17,32 @@ st.set_page_config(
 # Load API Keys (OpenRouter)
 # -----------------------------
 @st.cache_resource
-def get_client():
+def _initialize_openai_client():
+    """
+    Internal function to initialize the OpenAI client using Streamlit secrets.
+    """
     return OpenAI(
         api_key=st.secrets["OPENROUTER_API_KEY"],
         base_url=st.secrets["OPENROUTER_BASE_URL"]
     )
 
-client = None  # Lazy initialized
+def get_openai_client():
+    """
+    Returns the OpenAI client, initializing it only when needed.
+    This prevents the application from crashing on import if st.secrets are missing.
+    """
+    global client
+    if client is not None:
+        return client
+
+    try:
+        client = _initialize_openai_client()
+    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+        # Graceful fallback for environments where secrets are not available (e.g., tests)
+        return None
+    return client
+
+client = None  # Global cache for the client
 
 # -----------------------------
 # Retro Styling
@@ -66,9 +85,12 @@ def get_remedies_advice(judgment_text, language):
     """
     Call LLM to get remedies for this judgment
     """
-    global client
-    if client is None:
-        client = get_client()
+    client = get_openai_client()
+    if not client:
+        # If we can't get a client, we shouldn't continue in this function
+        # This typically happens during testing if mocks aren't set up,
+        # or if the user hasn't configured secrets yet.
+        return None
 
     prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
     
@@ -127,9 +149,11 @@ def main():
     st.markdown("---")
 
     if uploaded_file and st.button("🚀 Generate Summary"):
-        global client
-        if client is None:
-            client = get_client()
+        client = get_openai_client()
+
+        if not client:
+            st.error("OpenAI client not initialized. Please ensure OPENROUTER_API_KEY and OPENROUTER_BASE_URL are set in .streamlit/secrets.toml")
+            return
 
         with st.spinner("Processing judgment…"):
             try:
