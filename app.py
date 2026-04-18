@@ -1,14 +1,37 @@
 import streamlit as st
 from openai import OpenAI
-import PyPDF2
+from pypdf import PdfReader
+import logging
+import os
 
-# -----------------------------
-# App Config
-# -----------------------------
+# ==================== Notification System Setup ====================
+from database import init_db, SessionLocal, get_db
+from scheduler import start_scheduler, stop_scheduler
+
+# Initialize database
+init_db()
+
+# Start background scheduler on app startup
+if "scheduler_started" not in st.session_state:
+    try:
+        start_scheduler()
+        st.session_state.scheduler_started = True
+        logging.info("Background scheduler started")
+    except Exception as e:
+        logging.error(f"Failed to start scheduler: {str(e)}")
+        st.session_state.scheduler_started = False
+
+# ==================== Logging Setup ====================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+
+# ==================== App Config ====================
 st.set_page_config(
     page_title="LegalEase AI",
     page_icon="⚖",
-    layout="centered"
+    layout="wide" if st.query_params.get("page") == "deadlines" else "centered"
 )
 
 
@@ -63,7 +86,7 @@ st.markdown("""
 # Helper: PDF to text
 # -----------------------------
 def extract_text_from_pdf(uploaded_pdf):
-    reader = PyPDF2.PdfReader(uploaded_pdf)
+    reader = PdfReader(uploaded_pdf)
     text = ""
     for page in reader.pages:
         page_text = page.extract_text()
