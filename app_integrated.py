@@ -47,14 +47,10 @@ try:
     # Import original app components
     from app import (
         get_client,
-        extract_text_from_pdf,
-        compress_text,
-        english_leakage_detected,
-        build_prompt,
-        build_retry_prompt,
         get_remedies_advice,
-        parse_remedies_response,
+        DEFAULT_MODEL,
     )
+    import core
     client = get_client()
     all_features_available = True
 except ImportError as e:
@@ -150,15 +146,14 @@ def show_judgment_analysis():
                     st.error("❌ OpenRouter client not configured. Check your API keys.")
                     return
 
-                raw_text = extract_text_from_pdf(uploaded_file)
-                safe_text = compress_text(raw_text)
+                raw_text = core.extract_text_from_pdf(uploaded_file)
+                safe_text = core.compress_text(raw_text)
 
-                prompt = build_prompt(safe_text, language)
-                model_id = "meta-llama/llama-3.1-8b-instruct"
+                prompt = core.build_summary_prompt(safe_text, language)
 
                 # First attempt
                 response = client.chat.completions.create(
-                    model=model_id,
+                    model=DEFAULT_MODEL,
                     messages=[
                         {"role": "system", "content": "You are an expert legal simplification engine."},
                         {"role": "user", "content": prompt}
@@ -170,10 +165,10 @@ def show_judgment_analysis():
                 summary = response.choices[0].message.content.strip()
 
                 # Retry if English leakage detected
-                if language.lower() != "english" and english_leakage_detected(summary):
-                    retry_prompt = build_retry_prompt(safe_text, language)
+                if language.lower() != "english" and core.english_leakage_detected(summary):
+                    retry_prompt = core.build_retry_prompt(safe_text, language)
                     response2 = client.chat.completions.create(
-                        model=model_id,
+                        model=DEFAULT_MODEL,
                         messages=[
                             {"role": "system", "content": "Strict multilingual rewriting engine."},
                             {"role": "user", "content": retry_prompt}

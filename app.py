@@ -13,6 +13,9 @@ from scheduler import start_scheduler, stop_scheduler
 # Initialize database
 init_db()
 
+# Constants
+DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+
 # Start background scheduler on app startup
 if "scheduler_started" not in st.session_state:
     try:
@@ -40,16 +43,17 @@ st.set_page_config(
 # -----------------------------
 # Load API Keys (OpenRouter)
 # -----------------------------
+@st.cache_resource
 def get_client():
-    return OpenAI(
-        api_key=st.secrets["OPENROUTER_API_KEY"],
-        base_url=st.secrets["OPENROUTER_BASE_URL"]
-    )
-
-try:
-    client = get_client()
-except Exception:
-    client = None
+    """Lazy initialization of the OpenAI client"""
+    try:
+        return OpenAI(
+            api_key=st.secrets["OPENROUTER_API_KEY"],
+            base_url=st.secrets["OPENROUTER_BASE_URL"]
+        )
+    except Exception as e:
+        logging.error(f"Failed to initialize OpenAI client: {e}")
+        return None
 
 # -----------------------------
 # Retro Styling
@@ -93,10 +97,14 @@ def get_remedies_advice(judgment_text, language):
     """
     Call LLM to get remedies for this judgment
     """
+    client = get_client()
+    if not client:
+        return None
+
     prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
     
     response = client.chat.completions.create(
-        model="meta-llama/llama-3.1-8b-instruct",
+        model=DEFAULT_MODEL,
         messages=[
             {
                 "role": "system",
@@ -150,6 +158,11 @@ def main():
     st.markdown("---")
 
     if uploaded_file and st.button("🚀 Generate Summary"):
+        client = get_client()
+        if not client:
+            st.error("API client not initialized. Check your secrets.")
+            return
+
         with st.spinner("Processing judgment…"):
             try:
                 raw_text = core.extract_text_from_pdf(uploaded_file)
@@ -157,15 +170,8 @@ def main():
 
                 prompt = core.build_summary_prompt(safe_text, language)
 
-                # ⚡ Best multilingual model for Hindi/Bengali/Urdu
-                model_id = "meta-llama/llama-3.1-8b-instruct"
-
-
-                # -----------------------------
-                # FIRST ATTEMPT
-                # -----------------------------
                 response = client.chat.completions.create(
-                    model=model_id,
+                    model=DEFAULT_MODEL,
                     messages=[
                         {"role": "system", "content": "You are an expert legal simplification engine."},
                         {"role": "user", "content": prompt}
@@ -183,7 +189,7 @@ def main():
                     retry_prompt = core.build_retry_prompt(safe_text, language)
 
                     response2 = client.chat.completions.create(
-                        model=model_id,
+                        model=DEFAULT_MODEL,
                         messages=[
                             {"role": "system", "content": "Strict multilingual rewriting engine."},
                             {"role": "user", "content": retry_prompt}
@@ -277,7 +283,7 @@ def main():
                         st.subheader("📊 Quick Analytics Preview")
                         try:
                             from analytics_engine import AnalyticsAggregator
-                            from database import SessionLocal, CaseRecord
+                            from database import CaseRecord
                             
                             db = SessionLocal()
                             summary = AnalyticsAggregator.get_dashboard_summary(db)
