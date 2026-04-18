@@ -43,18 +43,17 @@ st.set_page_config(
 # -----------------------------
 # Load API Keys (OpenRouter)
 # -----------------------------
+@st.cache_resource
 def get_client():
     """Lazy initialization of the OpenAI client"""
-    if "openai_client" not in st.session_state:
-        try:
-            st.session_state.openai_client = OpenAI(
-                api_key=st.secrets["OPENROUTER_API_KEY"],
-                base_url=st.secrets["OPENROUTER_BASE_URL"]
-            )
-        except Exception as e:
-            logging.error(f"Failed to initialize OpenAI client: {e}")
-            return None
-    return st.session_state.openai_client
+    try:
+        return OpenAI(
+            api_key=st.secrets["OPENROUTER_API_KEY"],
+            base_url=st.secrets["OPENROUTER_BASE_URL"]
+        )
+    except Exception as e:
+        logging.error(f"Failed to initialize OpenAI client: {e}")
+        return None
 
 # -----------------------------
 # Retro Styling
@@ -159,20 +158,17 @@ def main():
     st.markdown("---")
 
     if uploaded_file and st.button("🚀 Generate Summary"):
+        client = get_client()
+        if not client:
+            st.error("API client not initialized. Check your secrets.")
+            return
+
         with st.spinner("Processing judgment…"):
             try:
                 raw_text = core.extract_text_from_pdf(uploaded_file)
                 safe_text = core.compress_text(raw_text)
 
                 prompt = core.build_summary_prompt(safe_text, language)
-
-                # -----------------------------
-                # FIRST ATTEMPT
-                # -----------------------------
-                client = get_client()
-                if not client:
-                    st.error("API client not initialized. Check your secrets.")
-                    return
 
                 response = client.chat.completions.create(
                     model=DEFAULT_MODEL,

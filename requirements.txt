@@ -1,11 +1,5 @@
 streamlit==1.56.0
 openai==2.30.0
-<<<<<<< HEAD
-PyPDF2==3.0.1
-pytest==9.0.2
-tqdm==4.67.1
-langdetect==1.0.9
-=======
 pypdf
 fpdf2
 pytest==9.0.2
@@ -31,4 +25,3 @@ pandas>=2.0.0
 plotly>=5.14.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
->>>>>>> c903f8343029252052db98020eb0fd0b8264c8dd
