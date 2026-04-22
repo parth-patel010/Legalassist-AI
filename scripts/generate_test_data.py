@@ -1,5 +1,6 @@
 
 import os
+import structlog
 from fpdf import FPDF
 import json
 
@@ -109,4 +110,5 @@ for i in range(1, 6):
 with open("tests/test_metadata.json", "w") as f:
     json.dump(test_data, f, indent=4)
 
-print("Generated 20 sample PDFs and test_metadata.json")
+logger = structlog.get_logger(__name__)
+logger.info("generated_test_data", count=len(test_data), path="tests/test_metadata.json")
