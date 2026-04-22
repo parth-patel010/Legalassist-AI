@@ -41,9 +41,12 @@ class TestSchedulerComprehensive:
         
         # Create deadlines at threshold days
         for days in [30, 10, 3, 1]:
+            # Use +days +1 hour to ensure delta.days == days
+            # This works now because we increased the query window to 31 days
+            deadline_date = now + timedelta(days=days, hours=1)
             create_case_deadline(
                 test_db, f"user_{days}", f"CASE_{days}", f"Title {days}",
-                now + timedelta(days=days, minutes=5), "appeal"
+                deadline_date, "appeal"
             )
             create_or_update_user_preference(
                 test_db, f"user_{days}", f"user{days}@example.com",
@@ -114,12 +117,14 @@ class TestSchedulerComprehensive:
     def test_check_reminders_sync_target_days(self, test_db):
         """Test sync version with target days filter"""
         now = datetime.now(timezone.utc)
+        deadline_date = now + timedelta(days=30, hours=1)
         create_case_deadline(
             test_db, "user1", "CASE_1", "Title",
-            now + timedelta(days=30, minutes=5), "appeal"
+            deadline_date, "appeal"
         )
         create_or_update_user_preference(
-            test_db, "user1", "user@example.com"
+            test_db, "user1", "user@example.com",
+            phone_number="+911234567890"
         )
         
         with patch("scheduler.SessionLocal", return_value=test_db), \
