@@ -210,7 +210,9 @@ def parse_remedies_response(response_text):
         "cost": "",
         "first_action": "",
         "deadline": "",
-        "appeal_details": ""
+        "appeal_details": "",
+        "_is_partial": False,
+        "_warning": ""
     }
 
     text = response_text.strip()
@@ -245,41 +247,72 @@ def parse_remedies_response(response_text):
     for num in sections:
         sections[num]["content"] = sections[num]["content"].strip()
     
-    # Map sections to keys based on count
-    is_7section = len(sections) >= 7
+    # Map sections to keys based on headers (preferred) or indices (fallback)
+    for num, data in sections.items():
+        header = data["header"].lower()
+        content = data["content"]
+        
+        # 1. Try keyword matching in headers first (most accurate)
+        if "happened" in header:
+            remedies["what_happened"] = content
+            continue
+        if "can" in header and "appeal" in header:
+            remedies["can_appeal"] = "yes" if "yes" in content.lower() else ("no" if "no" in content.lower() else content)
+            continue
+        if "timeline" in header or "days" in header:
+            days_match = re.search(r'\d+', content)
+            remedies["appeal_days"] = days_match.group() if days_match else content
+            continue
+        if "court" in header:
+            remedies["appeal_court"] = content
+            continue
+        if "cost" in header or "estimate" in header:
+            remedies["cost"] = content
+            remedies["cost_estimate"] = content
+            continue
+        if "first" in header or "action" in header:
+            remedies["first_action"] = content
+            continue
+        if "deadline" in header:
+            remedies["deadline"] = content
+            continue
+        if "details" in header:
+            remedies["appeal_details"] = content
+            extracted = extract_appeal_info(content)
+            if extracted["days"]: remedies["appeal_days"] = extracted["days"]
+            if extracted["court"]: remedies["appeal_court"] = extracted["court"]
+            if extracted["cost"]: remedies["cost"] = extracted["cost"]
+            continue
+
+        # 2. Fallback to index-based mapping if header keywords didn't match
+        if num == 1:
+            remedies["what_happened"] = content
+        elif num == 2:
+            remedies["can_appeal"] = "yes" if "yes" in content.lower() else ("no" if "no" in content.lower() else content)
+        elif num == 3:
+            # Likely appeal_days if 7 sections, or appeal_details if 5
+            days_match = re.search(r'\d+', content)
+            if days_match and len(content) < 20:
+                remedies["appeal_days"] = days_match.group()
+            else:
+                remedies["appeal_details"] = content
+        elif num == 4:
+            remedies["appeal_court"] = content
+        elif num == 5:
+            remedies["cost"] = content
+            remedies["cost_estimate"] = content
+        elif num == 6:
+            remedies["first_action"] = content
+        elif num == 7:
+            remedies["deadline"] = content
+
+    # Set partial flag and warning if we don't have everything
+    required_keys = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
+    missing = [k for k in required_keys if not remedies[k]]
     
-    if is_7section:
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            can_appeal_text = sections[2]["content"].lower()
-            remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
-        if 3 in sections:
-            # Extract just the number from "30 days"
-            appeal_days_text = sections[3]["content"]
-            match = re.search(r'\d+', appeal_days_text)
-            remedies["appeal_days"] = match.group() if match else appeal_days_text
-        if 4 in sections:
-            remedies["appeal_court"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["cost_estimate"] = sections[5]["content"]
-            remedies["cost"] = sections[5]["content"]  # Support both keys
-        if 6 in sections:
-            remedies["first_action"] = sections[6]["content"]
-        if 7 in sections:
-            remedies["deadline"] = sections[7]["content"]
-    else:
-        # 5-section format (old)
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            remedies["can_appeal"] = sections[2]["content"]
-        if 3 in sections:
-            remedies["appeal_details"] = sections[3]["content"]
-        if 4 in sections:
-            remedies["first_action"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["deadline"] = sections[5]["content"]
+    if len(sections) < 7 or missing:
+        remedies["_is_partial"] = True
+        remedies["_warning"] = "Note: Some legal advice sections could not be fully parsed. Information may be incomplete."
 
     return remedies
 
