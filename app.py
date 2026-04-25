@@ -1,4 +1,5 @@
 import streamlit as st
+import openai
 from openai import OpenAI
 from pypdf import PdfReader
 import logging
@@ -188,6 +189,10 @@ def main():
 
                     # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                     model_id = get_default_model()
+                    
+                    # Added a 60-second timeout to prevent the Streamlit app
+                    # from spinning indefinitely in case the OpenAI API
+                    # hangs or becomes unresponsive.
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
@@ -196,6 +201,7 @@ def main():
                         ],
                         max_tokens=280,
                         temperature=0.05,
+                        timeout=60.0,
                     )
 
                     summary = response.choices[0].message.content.strip()
@@ -206,6 +212,9 @@ def main():
                     if language.lower() != "english" and english_leakage_detected(summary):
                         retry_prompt = build_retry_prompt(safe_text, language)
 
+                        # Added a 60-second timeout to prevent the Streamlit app
+                        # from spinning indefinitely in case the OpenAI API
+                        # hangs or becomes unresponsive.
                         response2 = client.chat.completions.create(
                             model=model_id,
                             messages=[
@@ -214,6 +223,7 @@ def main():
                             ],
                             max_tokens=260,
                             temperature=0.03,
+                            timeout=60.0,
                         )
                         retry_summary = response2.choices[0].message.content.strip()
 
@@ -246,6 +256,10 @@ def main():
                     
                     with st.spinner("Analyzing your legal options..."):
                         try:
+                            
+                            # Show warning if data is partial
+                            if remedies.get("_is_partial"):
+                                st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
                             
                             # Show each answer
                             if remedies.get("what_happened"):
@@ -407,13 +421,36 @@ def main():
                     st.markdown("---")
                     render_localized_legal_help()
 
-            except Exception as e:
-                err = str(e)
+            except ValueError as e:
+                st.error(f"❌ Extraction Error: {str(e)}")
+                logging.error(f"Text extraction failed: {str(e)}")
 
-                if "402" in err or "credits" in err.lower():
-                    st.error("❌ Not enough OpenRouter credits. Please top up.")
+            except openai.APIConnectionError as e:
+                st.error("❌ Network Error: Could not connect to the AI service. Please check your internet.")
+                logging.error(f"API Connection error: {str(e)}")
+
+            except openai.RateLimitError as e:
+                st.error("❌ Rate Limit: Too many requests. Please wait a moment before trying again.")
+                logging.error(f"API Rate limit: {str(e)}")
+
+            except openai.AuthenticationError as e:
+                st.error("❌ API Key Error: Your OpenRouter/OpenAI key is invalid or not found.")
+                logging.error(f"API Auth error: {str(e)}")
+
+            except openai.APIStatusError as e:
+                if e.status_code == 402:
+                    st.error("❌ Out of Credits: Please top up your OpenRouter account to continue.")
                 else:
-                    st.error(f"An error occurred: {err}")
+                    st.error(f"❌ AI Service Error ({e.status_code}): {e.message}")
+                logging.error(f"API Status error: {str(e)}")
+
+            except openai.APIError as e:
+                st.error(f"❌ AI Service Error: {str(e)}")
+                logging.error(f"OpenAI API error: {str(e)}")
+
+            except Exception as e:
+                st.error(f"❌ Unexpected Error: {str(e)}")
+                logging.exception("An unhandled exception occurred in the main loop")
 
 if __name__ == "__main__":
     main()
