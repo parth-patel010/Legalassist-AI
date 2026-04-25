@@ -4,7 +4,24 @@ from pypdf import PdfReader
 import logging
 import os
 import re
-import core
+import json
+from pathlib import Path
+
+# ==================== Import Utilities from core.app_utils ====================
+from core.app_utils import (
+    get_client,
+    get_default_model,
+    _initialize_openai_client,
+    extract_text_from_pdf,
+    compress_text,
+    english_leakage_detected,
+    build_prompt,
+    build_summary_prompt,
+    build_retry_prompt,
+    build_remedies_prompt,
+    parse_remedies_response,
+    get_remedies_advice,
+)
 
 # ==================== Notification System Setup ====================
 from database import init_db, SessionLocal, get_db, DocumentType
@@ -14,15 +31,6 @@ from case_manager import get_user_cases_summary, upload_case_document, create_ne
 
 # Initialize database
 init_db()
-
-# Constants moved to lazy initialization to prevent import crashes
-def get_default_model():
-    """Returns the default model to use, safely accessing st.secrets."""
-    try:
-        return st.secrets.get("DEFAULT_MODEL", core.DEFAULT_MODEL)
-    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
-        # Fallback to core.DEFAULT_MODEL if secrets are unavailable
-        return core.DEFAULT_MODEL
 
 # Start background scheduler on app startup
 if "scheduler_started" not in st.session_state:
@@ -47,96 +55,89 @@ st.set_page_config(
     layout="wide" if st.query_params.get("page") == "deadlines" else "centered"
 )
 
-
-# -----------------------------
-# Load API Keys (OpenRouter)
-# -----------------------------
-client = None  # Global cache for the client
-
-@st.cache_resource
-def _initialize_openai_client():
-    """
-    Internal function to initialize the OpenAI client using Streamlit secrets.
-    """
-    return OpenAI(
-        api_key=st.secrets["OPENROUTER_API_KEY"],
-        base_url=st.secrets["OPENROUTER_BASE_URL"]
-    )
-
-def get_client():
-    """
-    Returns the OpenAI client, initializing it only when needed.
-    This prevents the application from crashing on import if st.secrets are missing.
-    """
-    global client
-    if client is not None:
-        return client
-
-    try:
-        client = _initialize_openai_client()
-    except (KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
-        # Graceful fallback for environments where secrets are not available (e.g., tests)
-        logging.error(f"Failed to initialize OpenAI client: {e}")
-        return None
-    return client
-
 # Using default Streamlit theme
 
-# -----------------------------
-# LLM Interaction Helpers (using core)
-# -----------------------------
+LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
 
 
-def get_remedies_advice(judgment_text, language):
-    """
-    Call LLM to get remedies for this judgment
-    """
-    client = get_client()
-    if not client:
-        return None
+@st.cache_data(show_spinner=False)
+def load_legal_aid_directory():
+    """Load state-wise legal aid directory from JSON data file."""
+    if not LEGAL_AID_DIRECTORY_PATH.exists():
+        logging.error("legal_aid_directory.json not found")
+        return {}
 
-    prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
-    
-    response = client.chat.completions.create(
-        model=get_default_model(),
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        max_tokens=500,  # Longer for detailed answers
-        temperature=0.1,  # Low temp = more consistent
+    try:
+        with LEGAL_AID_DIRECTORY_PATH.open("r", encoding="utf-8") as fp:
+            payload = json.load(fp)
+        return payload.get("states", {})
+    except Exception as e:
+        logging.error(f"Failed to load legal aid directory: {str(e)}")
+        return {}
+
+
+def render_localized_legal_help():
+    """Render state-specific legal help resources."""
+    st.markdown("## 📞 Free Legal Help")
+
+    directory = load_legal_aid_directory()
+    if not directory:
+        st.warning("Localized legal help data is unavailable right now.")
+        return
+
+    state_names = sorted(directory.keys())
+    selected_state = st.selectbox(
+        "Select your state/UT",
+        options=state_names,
+        key="legal_help_state_selector",
     )
-    
-    response_text = response.choices[0].message.content.strip()
-    remedies = core.parse_remedies_response(response_text)
-    
-    if remedies is None:
-        return {
-            "what_happened": None,
-            "can_appeal": None,
-            "appeal_days": None,
-            "appeal_court": None,
-            "cost_estimate": None,
-            "cost": None,
-            "first_action": None,
-            "deadline": None,
-        }
-    
-    return remedies
 
-# -----------------------------
-# UI
-# -----------------------------
+    state_data = directory.get(selected_state, {})
+    authority = state_data.get("legal_aid_authority", {})
+    colleges = state_data.get("law_colleges", [])
+    ngos = state_data.get("ngos", [])
+    bar_association = state_data.get("bar_association", {})
+    avg_cost = state_data.get("avg_cost", "Not available")
 
-# -----------------------------
-# Main Action Wrapper
-# -----------------------------
+    st.success(f"Showing legal help resources for {selected_state}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### State Legal Aid Authority")
+        st.write(f"**Name:** {authority.get('name', 'N/A')}")
+        st.write(f"**Phone:** {authority.get('phone', 'N/A')}")
+        st.write(f"**Website:** {authority.get('website', 'N/A')}")
+
+        st.markdown("### State Bar Association")
+        st.write(f"**Name:** {bar_association.get('name', 'N/A')}")
+        st.write(f"**Phone:** {bar_association.get('phone', 'N/A')}")
+        st.write(f"**Website:** {bar_association.get('website', 'N/A')}")
+
+        st.markdown("### Average Appeal Cost")
+        st.info(avg_cost)
+
+    with col2:
+        st.markdown("### Law Colleges with Legal Clinics")
+        if colleges:
+            for college in colleges:
+                clinic_status = "Yes" if college.get("clinic_available") else "No"
+                st.write(
+                    f"- **{college.get('name', 'N/A')}** ({college.get('city', 'N/A')}) | Clinic: {clinic_status}"
+                )
+        else:
+            st.write("No college records available.")
+
+        st.markdown("### NGOs")
+        if ngos:
+            for ngo in ngos:
+                st.write(
+                    f"- **{ngo.get('name', 'N/A')}** | {ngo.get('specialty', 'General legal aid')} | "
+                    f"{ngo.get('phone', 'N/A')} | {ngo.get('website', 'N/A')}"
+                )
+        else:
+            st.write("No NGO records available.")
+
+# ==================== Main UI Component ====================
 def main():
     init_auth_session()
     
@@ -180,10 +181,10 @@ def main():
             try:
                 # Only call LLM if we haven't processed this exact file/language combo
                 if st.session_state.get("last_processed") != f"{uploaded_file.name}_{language}":
-                    raw_text = core.extract_text_from_pdf(uploaded_file)
-                    safe_text = core.compress_text(raw_text)
+                    raw_text = extract_text_from_pdf(uploaded_file)
+                    safe_text = compress_text(raw_text)
 
-                    prompt = core.build_summary_prompt(safe_text, language)
+                    prompt = build_summary_prompt(safe_text, language)
 
                     # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                     model_id = get_default_model()
@@ -202,8 +203,8 @@ def main():
                     # -----------------------------
                     # RETRY IF ENGLISH LEAKAGE
                     # -----------------------------
-                    if language.lower() != "english" and core.english_leakage_detected(summary):
-                        retry_prompt = core.build_retry_prompt(safe_text, language)
+                    if language.lower() != "english" and english_leakage_detected(summary):
+                        retry_prompt = build_retry_prompt(safe_text, language)
 
                         response2 = client.chat.completions.create(
                             model=model_id,
@@ -216,7 +217,7 @@ def main():
                         )
                         retry_summary = response2.choices[0].message.content.strip()
 
-                        if len(retry_summary) > 0 and not core.english_leakage_detected(retry_summary):
+                        if len(retry_summary) > 0 and not english_leakage_detected(retry_summary):
                             summary = retry_summary
 
                     remedies = get_remedies_advice(raw_text, language)
@@ -404,33 +405,7 @@ def main():
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
-                    st.markdown("## 📞 Free Legal Help")
-                    
-                    help_options = """
-                    **You don't have to handle this alone. Here are free resources:**
-                    
-                    🔗 **National Legal Services (Free Lawyer)**
-                    - Phone: 1800-180-8111
-                    - Website: nalsa.gov.in
-                    - For: Everyone (especially poor citizens)
-                    
-                    🔗 **Bar Council of India (Find Verified Lawyers)**
-                    - Website: bci.org.in
-                    - For: Finding qualified lawyers in your area
-                    
-                    🔗 **Legal Clinics (Law Colleges)**
-                    - Most law colleges offer free consultation
-                    - Search: "[Your City] law college legal clinic"
-                    
-                    🔗 **NGOs for Specific Cases**
-                    - Family cases: National Commission for Women (1800-123-4344)
-                    - Criminal cases: Criminal Law Clinic (project39a.com)
-                    - Tenant rights: Housing rights organizations
-                    
-                    **Tip:** Start with National Legal Services. They are free and available.
-                    """
-                    
-                    st.info(help_options)
+                    render_localized_legal_help()
 
             except Exception as e:
                 err = str(e)
