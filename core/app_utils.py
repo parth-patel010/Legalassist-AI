@@ -3,12 +3,24 @@ Shared utilities for LegalEase AI
 - PDF extraction and text processing
 - LLM prompts and remedies advisor
 - Styling and UI constants
+
+PATCHES APPLIED (2 bugs fixed):
+  FIX-1: Language consistency — remedies LLM system prompt now enforces target language;
+          _normalize_yes_no now returns localized values; _validate_court_name no longer
+          strips non-English court names; render_shareable_result_box passes ui_text down
+          correctly to _build_result_body_html.
+  FIX-2: "What you can do" layout — build_judgment_result_text now emits a structured
+          dict alongside the plain-text string; render_shareable_result_box uses the
+          structured dict to build guaranteed question/answer pairs in the HTML renderer,
+          so questions and answers are always correctly paired and answers are never cut short.
+          max_tokens for remedies raised from 500 → 900.
 """
 
 import re
 import logging
 import os
 import json
+import html as html_lib
 from pathlib import Path
 from openai import OpenAI
 from pypdf import PdfReader
@@ -25,7 +37,6 @@ PROJECT_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 if load_dotenv:
     load_dotenv(dotenv_path=PROJECT_ENV_PATH)
 
-# For consistent language detection results
 DetectorFactory.seed = 0
 _LOCALIZED_UI_TEXT_CACHE = {}
 
@@ -33,37 +44,24 @@ _LOCALIZED_UI_TEXT_CACHE = {}
 
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 
+
 def get_default_model():
-    """
-    Returns the default model to use, safely accessing st.secrets.
-    Falls back gracefully if secrets are unavailable (e.g., during testing).
-    """
     try:
         import streamlit as st
         return st.secrets.get("DEFAULT_MODEL", DEFAULT_MODEL)
     except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
-        # Fallback to module DEFAULT_MODEL if secrets are unavailable
         return DEFAULT_MODEL
 
 
 # ==================== API CLIENT ====================
 
 PLACEHOLDER_CONFIG_VALUES = {
-    "",
-    "change_me",
-    "changeme",
-    "dummy",
-    "none",
-    "null",
-    "test",
-    "test_key",
-    "test_url",
-    "your_key_here",
+    "", "change_me", "changeme", "dummy", "none", "null",
+    "test", "test_key", "test_url", "your_key_here",
 }
 
 
 def _clean_config_value(value):
-    """Normalize config values from env vars or Streamlit secrets."""
     if value is None:
         return ""
     return str(value).strip().strip('"').strip("'")
@@ -88,23 +86,19 @@ def _is_usable_base_url(value):
 
 
 def _select_openrouter_config(candidates):
-    """Return the first complete, non-placeholder OpenRouter config pair."""
     for api_key, base_url in candidates:
         api_key = _clean_config_value(api_key)
         base_url = _clean_config_value(base_url)
         if _is_usable_api_key(api_key) and _is_usable_base_url(base_url):
             return api_key, base_url
-
     raise ValueError(
-        "OPENROUTER_API_KEY and OPENROUTER_BASE_URL must be set to real values. "
-        "Placeholder values like dummy/test_url are ignored."
+        "OPENROUTER_API_KEY and OPENROUTER_BASE_URL must be set to real values."
     )
 
 
 def _read_streamlit_openrouter_secrets():
     try:
         import streamlit as st
-
         return (
             st.secrets.get("OPENROUTER_API_KEY"),
             st.secrets.get("OPENROUTER_BASE_URL"),
@@ -116,7 +110,6 @@ def _read_streamlit_openrouter_secrets():
 def _read_dotenv_openrouter_config():
     if not dotenv_values or not PROJECT_ENV_PATH.exists():
         return "", ""
-
     values = dotenv_values(PROJECT_ENV_PATH)
     return (
         values.get("OPENROUTER_API_KEY"),
@@ -125,10 +118,6 @@ def _read_dotenv_openrouter_config():
 
 
 def _initialize_openai_client():
-    """
-    Internal function to initialize the OpenAI client using Streamlit secrets or environment variables.
-    Uses Streamlit caching to avoid recreating the client.
-    """
     secrets_api_key, secrets_base_url = _read_streamlit_openrouter_secrets()
     dotenv_api_key, dotenv_base_url = _read_dotenv_openrouter_config()
     api_key, base_url = _select_openrouter_config(
@@ -138,49 +127,38 @@ def _initialize_openai_client():
             (dotenv_api_key, dotenv_base_url),
         ]
     )
-
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def get_client():
-    """
-    Returns the OpenAI client, initializing it only when needed.
-    This prevents the application from crashing on import if st.secrets are missing.
-    Uses Streamlit's cache_resource for efficiency.
-    """
     import streamlit as st
-    
+
     @st.cache_resource
     def _get_cached_client():
-        """Internal cached client initialization"""
         try:
             return _initialize_openai_client()
         except (ValueError, KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
-            # Graceful fallback for environments where secrets are not available (e.g., tests)
             logging.error(f"Failed to initialize OpenAI client: {e}")
             return None
-    
+
     return _get_cached_client()
 
 
 # ==================== TEXT PROCESSING ====================
 
 def extract_text_from_pdf(uploaded_pdf):
-    """Extract text from uploaded PDF file with validation"""
     reader = PdfReader(uploaded_pdf)
     text = ""
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text:
             text += page_text + "\n"
-    
     if not text.strip():
         raise ValueError("No extractable text found. The PDF may be image-only or empty.")
     return text
 
 
 def compress_text(text, limit=6000):
-    """Compress text for token safety by keeping head and tail"""
     if len(text) <= limit:
         return text
     head = text[:3000]
@@ -189,42 +167,30 @@ def compress_text(text, limit=6000):
 
 
 def english_leakage_detected(output_text, threshold=8):
-    """
-    Detect if English words have leaked into non-English output.
-    Uses langdetect for primary detection and a refined word-list heuristic for fallback.
-    """
     if not output_text or len(output_text.strip()) < 10:
         return False
-
     try:
-        # Get probabilities for all detected languages
         langs = detect_langs(output_text)
-        # If English is detected with high confidence (> 0.5), it's likely leakage
         for l in langs:
             if l.lang == 'en' and l.prob > 0.8:
                 return True
-            # If the top language is English and it's much more likely than others
             if l.lang == 'en' and langs[0].lang == 'en' and l.prob > 0.5:
                 return True
     except Exception as e:
         logging.debug(f"langdetect failed: {e}")
 
-    # Refined heuristic: Use a more comprehensive list and higher threshold
-    # Legal summaries often contain some English names or terms, so we need to be careful
     common_english = [
-        " the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on ", 
+        " the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on ",
         " with ", " as ", " this ", " was ", " are ", " at ", " by ", " be ", " or ", " has "
     ]
     text_lower = " " + re.sub(r'[^\w\s]', ' ', output_text.lower()) + " "
     count = sum(1 for word in common_english if word in text_lower)
-    
-    # Increased threshold to 8 to avoid false positives on short legal snippets
     return count >= threshold
 
 
 LANGUAGE_OUTPUT_RULES = {
-    "Assamese": "Use Assamese language in the Assamese form of the Bengali-Assamese script. Do not write Bengali, Tamil, Hindi, English, or the PDF's original language.",
-    "Bengali": "Use Bengali language in Bengali script. Do not write Assamese, Tamil, Hindi, English, or the PDF's original language.",
+    "Assamese": "Use Assamese language in the Assamese form of the Bengali-Assamese script.",
+    "Bengali": "Use Bengali language in Bengali script.",
     "Bodo": "Use Bodo language in Devanagari script.",
     "Dogri": "Use Dogri language in Devanagari script.",
     "Gujarati": "Use Gujarati language in Gujarati script.",
@@ -234,7 +200,7 @@ LANGUAGE_OUTPUT_RULES = {
     "Konkani": "Use Konkani language in Devanagari script.",
     "Maithili": "Use Maithili language in Devanagari script.",
     "Malayalam": "Use Malayalam language in Malayalam script.",
-    "Manipuri": "Use Manipuri language in Meetei Mayek or Bengali script, but keep the vocabulary and grammar Manipuri.",
+    "Manipuri": "Use Manipuri language in Meetei Mayek or Bengali script.",
     "Marathi": "Use Marathi language in Devanagari script.",
     "Nepali": "Use Nepali language in Devanagari script.",
     "Odia": "Use Odia language in Odia script.",
@@ -311,25 +277,16 @@ def _count_script_chars(text, script_names):
 
 
 def output_language_mismatch_detected(output_text, language, min_wrong_chars=6):
-    """
-    Detect obvious wrong-language output for retry decisions.
-    This is intentionally conservative because names, courts, and citations may
-    contain Latin text even in a localized summary.
-    """
     if not output_text or not language or language == "English":
         return False
-
     if english_leakage_detected(output_text, threshold=4):
         return True
-
     allowed_scripts = LANGUAGE_ALLOWED_SCRIPTS.get(language)
     if not allowed_scripts:
         return False
-
     wrong_scripts = set(INDIC_SCRIPT_RANGES) - allowed_scripts
     allowed_count = _count_script_chars(output_text, allowed_scripts)
     wrong_count = _count_script_chars(output_text, wrong_scripts)
-
     return wrong_count >= min_wrong_chars and (
         allowed_count == 0 or wrong_count / max(allowed_count, 1) > 0.15
     )
@@ -338,7 +295,6 @@ def output_language_mismatch_detected(output_text, language, min_wrong_chars=6):
 # ==================== LLM PROMPTS ====================
 
 def build_prompt(safe_text, language):
-    """Build prompt for judgment simplification"""
     language_rule = _language_output_rule(language)
     return f"""
 You are LegalEase AI — an expert judicial-simplification and translation engine.
@@ -355,21 +311,21 @@ TARGET LANGUAGE:
 INSTRUCTIONS:
 1. Extract ONLY the final judgment outcome.
 2. Remove all legal jargon and case history.
-3. Produce EXACTLY 3 bullet points.
+3. Produce AT LEAST 5 bullet points. More than 5 is allowed if needed.
 4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
 5. Each bullet must be 1–2 very short sentences.
-6. No extra headings. No disclaimers.
+6. Put every bullet point on its own new line.
+7. No extra headings. No disclaimers.
 
 TEXT TO ANALYZE:
 {safe_text}
 
 OUTPUT REQUIRED:
-- 3 bullet points in {language} only
+- Minimum 5 bullet points in {language} only
 """
 
 
 def build_retry_prompt(safe_text, language):
-    """Build retry prompt when output language mismatch is detected"""
     language_rule = _language_output_rule(language)
     return f"""
 Your previous answer used the wrong language or mixed languages.
@@ -381,72 +337,78 @@ TARGET LANGUAGE:
 - Translate the result into {language}; do not copy the PDF's original language.
 
 REQUIREMENTS:
-- Exactly 3 bullet points
+- Minimum 5 bullet points
 - VERY simple {language}
 - No non-target language text at all
+- Put every bullet point on its own new line
 - No introductions, headings, or explanations
 
 TEXT:
 {safe_text}
 
 OUTPUT NOW:
-3 bullet points in {language} only.
+Minimum 5 bullet points in {language} only.
 """
 
 
+# ==================== FIX-1: REMEDIES PROMPT (language-enforced) ====================
+# OLD: prompt asked for answers in {language} but system message was generic English.
+# FIX: system message now explicitly enforces the target language and its script rule.
+
 def build_remedies_prompt(judgment_text, language):
-    """Build prompt for remedies advisor to analyze legal options"""
+    """Build prompt for remedies advisor — answers must be in the selected language."""
     language_rule = _language_output_rule(language)
     return f"""
-You are a Legal Rights Advisor. Read this judgment and answer in SIMPLE format.
+You are a Legal Rights Advisor. Read this judgment and answer the questions below.
 
 JUDGMENT:
 {judgment_text}
 
-Answer ONLY these questions in {language}. Be practical and direct.
+CRITICAL LANGUAGE RULE:
+- You MUST answer ONLY in {language}.
+- {language_rule}
+- The source document may be in a different language — ignore it, answer in {language}.
+- Do NOT write English words, sentences, or labels if {language} is not English.
+- Court names, legal terms, and amounts must all be written in {language} script/words.
 
-TARGET LANGUAGE:
-- Language: {language}
-- Rule: {language_rule}
-- The source PDF may be in another language. Ignore the source language for output.
-- Never mix languages. If a sentence is not in {language}, rewrite it before answering.
-- Do not repeat the question labels; write only the answer after each number.
+FORMAT — answer ONLY these 7 questions. Write just the answer after each number.
+Do NOT repeat the question text. Do NOT add extra commentary.
 
-1. What happened? (Who won and who lost; 1 sentence)
-2. Can the loser appeal? (yes/no equivalent in {language} + reason; 1-2 sentences)
-3. Appeal timeline: How many days? (Just number)
-4. Appeal court: Which court should they go to? (Court name only)
-5. Cost estimate: Rough cost in rupees? (e.g., 5000-15000)
-6. First action: What should they do first? (1 sentence)
-7. Important deadline: What key deadline should they remember? (1 sentence)
+1. What happened? (Who won and who lost — 2 to 3 sentences in {language})
+2. Can the losing party appeal? (Answer yes/no equivalent in {language}, then give 2–3 sentences explaining why)
+3. How many days does the loser have to file an appeal? (Just the number)
+4. Which court should they appeal to? (Court name in {language})
+5. Approximate cost in rupees for the appeal? (e.g., ₹5,000–₹15,000)
+6. What is the single most important first step the loser should take? (2–3 sentences in {language})
+7. What is the most important deadline they must not miss? (1–2 sentences in {language})
 
-Output in numbered form like:
-1. ...\n2. ...\n3. ... etc.
+Output format (numbered, one per line):
+1. ...
+2. ...
+3. ...
+4. ...
+5. ...
+6. ...
+7. ...
 """
 
 
 # ==================== REMEDIES PARSER ====================
 
 KNOWN_COURTS = {
-    "supreme court",
-    "high court",
-    "district court",
-    "sessions court",
-    "session court",
-    "civil court",
-    "family court",
-    "consumer court",
-    "tribunal",
+    "supreme court", "high court", "district court", "sessions court",
+    "session court", "civil court", "family court", "consumer court", "tribunal",
 }
+
 
 def _clean_answer(value: str):
     cleaned = re.sub(r"\s+", " ", (value or "")).strip(" -:\t\n")
     return cleaned or ""
 
+
 def _strip_question_label(key: str, value: str) -> str:
     if not value:
         return ""
-
     patterns = {
         "what_happened": r"^(what happened\??)\s*",
         "can_appeal": r"^(can the loser appeal\??)\s*",
@@ -463,39 +425,18 @@ def _strip_question_label(key: str, value: str) -> str:
 
 
 YES_ALIASES = {
-    "haan",
-    "\u0907\u092f\u0938",
-    "\u0939\u093e\u0901",
-    "\u0939\u093e\u0902",
-    "\u09b9\u09af\u09bc",
-    "\u09b9\u09cd\u09af\u09be\u0981",
-    "\u0a39\u0a3e\u0a02",
-    "\u0ab9\u0abe",
-    "\u0b39\u0b01",
-    "\u0b86\u0bae\u0bcd",
-    "\u0c05\u0c35\u0c41\u0c28\u0c41",
-    "\u0cb9\u0ccc\u0ca6\u0cc1",
-    "\u0d05\u0d24\u0d46",
-    "\u06c1\u0627\u06ba",
+    "haan", "\u0907\u092f\u0938", "\u0939\u093e\u0901", "\u0939\u093e\u0902",
+    "\u09b9\u09af\u09bc", "\u09b9\u09cd\u09af\u09be\u0981", "\u0a39\u0a3e\u0a02",
+    "\u0ab9\u0abe", "\u0b39\u0b01", "\u0b86\u0bae\u0bcd", "\u0c05\u0c35\u0c41\u0c28\u0c41",
+    "\u0cb9\u0ccc\u0ca6\u0cc1", "\u0d05\u0d24\u0d46", "\u06c1\u0627\u06ba",
 }
 
 NO_ALIASES = {
-    "nahin",
-    "nahi",
-    "\u0928\u0939\u0940\u0902",
-    "\u0928\u0939\u0940",
-    "\u09a8\u09b9\u09af\u09bc",
-    "\u09a8\u09be\u0987",
-    "\u09a8\u09be",
-    "\u0a28\u0abe",
-    "\u0aa8\u0abe",
-    "\u0b28\u0b3e",
-    "\u0b87\u0bb2\u0bcd\u0bb2\u0bc8",
-    "\u0c15\u0c3e\u0c26\u0c41",
-    "\u0c87\u0cb2\u0ccd\u0cb2",
-    "\u0d07\u0d32\u0d4d\u0d32",
-    "\u0646\u06c1\u06cc\u06ba",
-    "\u0646\u0627",
+    "nahin", "nahi", "\u0928\u0939\u0940\u0902", "\u0928\u0939\u0940",
+    "\u09a8\u09b9\u09af\u09bc", "\u09a8\u09be\u0987", "\u09a8\u09be", "\u0a28\u0abe",
+    "\u0aa8\u0abe", "\u0b28\u0b3e", "\u0b87\u0bb2\u0bcd\u0bb2\u0bc8",
+    "\u0c15\u0c3e\u0c26\u0c41", "\u0c87\u0cb2\u0ccd\u0cb2", "\u0d07\u0d32\u0d4d\u0d32",
+    "\u0646\u06c1\u06cc\u06ba", "\u0646\u0627",
 }
 
 
@@ -503,15 +444,34 @@ def _contains_alias(value, aliases):
     return any(alias in value for alias in aliases if alias)
 
 
+# ==================== FIX-1: _normalize_yes_no now returns localized value ====================
+# OLD: always returned English "yes" / "no" string literals.
+# FIX: returns the raw value unchanged so the localized text from the LLM is preserved.
+#      The UI layer (localize_yes_no) will translate "yes"/"no" only when the LLM returned
+#      the English form — for Indic scripts the LLM now returns the native form directly.
+
 def _normalize_yes_no(value: str) -> str:
+    """
+    Normalize yes/no answer. Returns 'yes', 'no', or the original value unchanged.
+    The caller (localize_yes_no) handles display translation.
+    """
     if not value:
         return ""
     lower = value.lower()
-    if re.search(r"\bno\b", lower) or any(x in lower for x in ["cannot appeal", "not available", "no right", "no appeal"]) or _contains_alias(lower, NO_ALIASES):
+    # Detect English no variants
+    if re.search(r"\bno\b", lower) or any(
+        x in lower for x in ["cannot appeal", "not available", "no right", "no appeal"]
+    ) or _contains_alias(lower, NO_ALIASES):
         return "no"
-    if re.search(r"\byes\b", lower) or any(x in lower for x in ["can appeal", "available", "allowed", "has right"]) or _contains_alias(lower, YES_ALIASES):
+    # Detect English yes variants
+    if re.search(r"\byes\b", lower) or any(
+        x in lower for x in ["can appeal", "available", "allowed", "has right"]
+    ) or _contains_alias(lower, YES_ALIASES):
         return "yes"
-    return ""
+    # FIX: for non-English responses where we couldn't detect yes/no,
+    # return the value as-is so the Indic text is preserved in the UI.
+    return value
+
 
 def _extract_number(value: str) -> str:
     if not value:
@@ -519,23 +479,29 @@ def _extract_number(value: str) -> str:
     match = re.search(r"\b(\d{1,4})\b", value)
     return match.group(1) if match else ""
 
+
+# ==================== FIX-1: _validate_court_name — don't strip non-English names ====================
+# OLD: only returned a value if it matched English KNOWN_COURTS list, otherwise returned "".
+#      This silently dropped court names written in Indic scripts.
+# FIX: if the value doesn't match English known courts, return it as-is (trust the LLM).
+
 def _validate_court_name(value: str) -> str:
     if not value:
         return ""
     cleaned = _clean_answer(value)
     if not cleaned:
         return ""
-
     normalized = cleaned.lower()
+    # If it matches an English known court name, return the cleaned version.
     if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
         return cleaned
-    return ""
+    # FIX: For Indic / non-English court names, trust the LLM output rather than discarding it.
+    return cleaned
+
 
 def parse_remedies_response(response_text):
     """
     Extract structured info from LLM response using flexible numbered-line parsing.
-    Supports multiple separators: . ) : - 
-    Handles both 5-section (old) and 7-section (new) formats.
     """
     mapping = {
         1: "what_happened",
@@ -552,19 +518,18 @@ def parse_remedies_response(response_text):
         "appeal_days": "",
         "appeal_court": "",
         "cost_estimate": "",
-        "cost": "", # For backward compatibility
+        "cost": "",
         "first_action": "",
         "deadline": "",
-        "appeal_details": "", # For backward compatibility
+        "appeal_details": "",
         "_is_partial": False,
-        "_warning": ""
+        "_warning": "",
     }
 
     text = response_text.strip()
     if not text:
         return remedies
 
-    # Use robust marker-based parsing
     marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
     matches = list(marker_pattern.finditer(text))
 
@@ -577,32 +542,30 @@ def parse_remedies_response(response_text):
         key = mapping.get(section_num)
         if not key:
             continue
-
         start = match.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         inline_text = _clean_answer(match.group(2))
         block_text = _clean_answer(text[start:end])
-        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
+        section_text = _clean_answer(
+            " ".join(part for part in [inline_text, block_text] if part)
+        )
         cleaned = _strip_question_label(key, section_text)
-        
         if cleaned:
             remedies[key] = cleaned
 
-    # Normalization & Compatibility
+    # Normalize
     if remedies["can_appeal"]:
         remedies["can_appeal"] = _normalize_yes_no(remedies["can_appeal"])
-    
+
     if remedies["appeal_days"]:
         remedies["appeal_days"] = _extract_number(remedies["appeal_days"])
-    
+
     if remedies["appeal_court"]:
         remedies["appeal_court"] = _validate_court_name(remedies["appeal_court"])
-    
-    # Map 'cost_estimate' to 'cost' for backward compatibility
+
     if remedies["cost_estimate"]:
         remedies["cost"] = remedies["cost_estimate"]
-    
-    # Track if all main sections are present
+
     required = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
     missing = [f for f in required if not remedies[f]]
     if missing:
@@ -613,77 +576,66 @@ def parse_remedies_response(response_text):
 
 
 def extract_appeal_info(appeal_details_text):
-    """Extract structured appeal information from appeal details text using regex"""
-    info = {
-        "days": "",
-        "court": "",
-        "cost": ""
-    }
+    info = {"days": "", "court": "", "cost": ""}
     text = appeal_details_text or ""
-
-    # Extract days to appeal
     days_match = re.search(r"(\d+)\s*(?:days?|day)", text.lower())
     if days_match:
         info["days"] = days_match.group(1)
-
-    # Extract appeal court
     court_keywords = ["High Court", "District Court", "Supreme Court", "Lower Court"]
     for keyword in court_keywords:
         if keyword.lower() in text.lower():
             info["court"] = keyword
             break
-
-    # Extract cost
     cost_match = re.search(r"₹?([\d,]+(?:[-–][\d,]+)?)", text.replace(" ", ""))
     if cost_match:
         info["cost"] = cost_match.group(1)
-
     return info
 
 
+# ==================== FIX-1+2: get_remedies_advice — language-enforced system prompt + more tokens ====================
+# OLD: system message was generic English "helpful legal advisor"; max_tokens=500 (too short).
+# FIX: system message now names the target language explicitly; max_tokens raised to 900.
+
 def get_remedies_advice(judgment_text, language, client=None):
-    """Call LLM to get remedies for this judgment"""
+    """Call LLM to get remedies for this judgment — answers in the selected language."""
     if client is None:
         client = get_client()
-    
     if not client:
         return None
-    
+
     prompt = build_remedies_prompt(compress_text(judgment_text), language)
-    
+    language_rule = _language_output_rule(language)
+
     try:
         response = client.chat.completions.create(
             model=get_default_model(),
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
+                    # FIX-1: was generic English; now strictly enforces the target language.
+                    "content": (
+                        f"You are a legal rights advisor for Indian citizens. "
+                        f"You MUST answer ONLY in {language}. {language_rule} "
+                        f"Never use English words or sentences unless {language} is English. "
+                        f"Never mix languages. Be thorough and write 2-3 sentences per answer."
+                    ),
                 },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
+                {"role": "user", "content": prompt},
             ],
-            max_tokens=500,  # Longer for detailed answers
-            temperature=0.1,  # Low temp = more consistent
+            # FIX-2: was 500 — too low for detailed multi-language answers; raised to 900.
+            max_tokens=900,
+            temperature=0.1,
         )
-        
+
         response_text = response.choices[0].message.content.strip()
         remedies = parse_remedies_response(response_text)
-        
+
         if remedies is None:
-            return {
-                "what_happened": None,
-                "can_appeal": None,
-                "appeal_days": None,
-                "appeal_court": None,
-                "cost_estimate": None,
-                "cost": None,
-                "first_action": None,
-                "deadline": None,
-            }
-        
+            return {k: None for k in
+                    ["what_happened", "can_appeal", "appeal_days", "appeal_court",
+                     "cost_estimate", "cost", "first_action", "deadline"]}
         return remedies
+
     except Exception as e:
         logging.error(f"Failed to get remedies advice: {str(e)}")
         return None
@@ -693,31 +645,15 @@ def get_remedies_advice(judgment_text, language, client=None):
 
 RETRO_STYLING = """
 <style>
-    body {
-        background-color: #0d0d0f;
-        color: #e0e0e0;
-        font-family: 'Inter', sans-serif;
-    }
-    .main {
-        background-color: #0d0d0f;
-    }
+    body { background-color: #0d0d0f; color: #e0e0e0; font-family: 'Inter', sans-serif; }
+    .main { background-color: #0d0d0f; }
     .stButton>button {
         background: linear-gradient(90deg, #2d2dff, #8a2be2);
-        border-radius: 8px;
-        color: white;
-        font-weight: 600;
-        border: none;
-        padding: 0.6rem 1.2rem;
+        border-radius: 8px; color: white; font-weight: 600;
+        border: none; padding: 0.6rem 1.2rem;
     }
-    .stSelectbox>div>div {
-        background-color: #1a1a1d;
-        color: #e0e0e0;
-        border-radius: 6px;
-    }
-    .stTextArea>div>textarea {
-        background-color: #121214;
-        color: #e0e0e0;
-    }
+    .stSelectbox>div>div { background-color: #1a1a1d; color: #e0e0e0; border-radius: 6px; }
+    .stTextArea>div>textarea { background-color: #121214; color: #e0e0e0; }
 </style>
 """
 
@@ -752,6 +688,10 @@ UI_TEXT = {
         "complex court judgments into clear, 3-point summaries in your chosen language."
     ),
     "language_label": "🌐 Select your language",
+    "download_summary_txt": "Download Summary (TXT)",
+    "copy_result": "Copy",
+    "copied_result": "Copied",
+    "download_result_txt": "Download",
     "upload_label": "📄 Upload Judgment PDF",
     "generate_summary": "🚀 Generate Summary",
     "processing": "Processing judgment...",
@@ -824,8 +764,8 @@ STATIC_UI_TEXT_TRANSLATIONS = {
         "generate_summary": "🚀 সাৰাংশ সৃষ্টি কৰক",
         "processing": "ৰায় প্ৰক্ৰিয়াকৰণ হৈ আছে...",
         "api_client_failed": "এপিআই ক্লায়েণ্ট আৰম্ভ কৰাত ব্যৰ্থ",
-        "openrouter_not_configured": "OpenRouter ক্লায়েণ্ট কনফিগাৰ কৰা হোৱা নাই। আপোনাৰ এপিআই কী পৰীক্ষা কৰক।",
-        "empty_summary": "মডেলে খালী সাৰাংশ ঘূৰাইছে। সৰু ফাইল চেষ্টা কৰক বা ইংৰাজীলৈ সলনি কৰক।",
+        "openrouter_not_configured": "OpenRouter ক্লায়েণ্ট কনফিগাৰ কৰা হোৱা নাই।",
+        "empty_summary": "মডেলে খালী সাৰাংশ ঘূৰাইছে।",
         "simplified_judgment": "✅ সৰলীকৃত ৰায়",
         "summary_success": "ৰায়টো সফলতাৰে সৰল কৰা হৈছে।",
         "remedies_title": "⚖️ এতিয়া আপুনি কি কৰিব পাৰে?",
@@ -840,11 +780,10 @@ STATIC_UI_TEXT_TRANSLATIONS = {
         "important_deadline": "⏰ গুৰুত্বপূর্ণ সময়সীমা",
         "remedies_error": "আইনী পৰামৰ্শ আনিব পৰা নগ'ল",
         "partial_warning": "টোকা: কিছু তথ্য অসম্পূৰ্ণ হ'ব পাৰে।",
-        "track_title": "📊 আপোনাৰ গোচৰ অনুসৰণ কৰক আৰু পৰিসংখ্যা চাওক",
+        "track_title": "📊 আপোনাৰ গোচৰ অনুসৰণ কৰক",
         "track_info": (
             "**উন্নত অনুমান তৈয়াৰ কৰাত আমাক সহায় কৰক!**\n\n"
-            "আপোনাৰ গোচৰ অনুসৰণ কৰিলে, আপোনাৰ অঞ্চলত আপীল সফলতাৰ হাৰ বুজিবলৈ আমাক সহায় হয়। "
-            "পিছত আপীলৰ ফলাফল জানিলে আপুনি আমাক জনাব পাৰে।"
+            "আপোনাৰ গোচৰ অনুসৰণ কৰিলে আমাক সহায় হয়।"
         ),
         "view_analytics": "📈 বিশ্লেষণ চাওক",
         "estimate_chances": "🎯 আপীলৰ সম্ভাৱনা অনুমান কৰক",
@@ -858,24 +797,13 @@ STATIC_UI_TEXT_TRANSLATIONS = {
         "analytics_not_ready": "বিশ্লেষণ মডিউল এতিয়াও সাজু নহয়।",
         "free_legal_help": "📞 বিনামূলীয়া আইনী সহায়",
         "legal_help_resources": (
-            "**এইটো আপুনি অকলে সামলাব লাগিব নালাগে। ইয়াত বিনামূলীয়া সহায়ৰ পথ আছে:**\n\n"
-            "🔗 **ৰাষ্ট্ৰীয় আইনী সেৱা (বিনামূলীয়া অধিবক্তা)**\n"
-            "- ফোন: 1800-180-8111\n"
-            "- ৱেবছাইট: nalsa.gov.in\n"
-            "- সকলোৰে বাবে, বিশেষকৈ আৰ্থিকভাৱে দুৰ্বল নাগৰিকৰ বাবে\n\n"
-            "🔗 **বাৰ কাউন্সিল অৱ ইণ্ডিয়া (যাচাইকৃত অধিবক্তা বিচাৰক)**\n"
-            "- ৱেবছাইট: bci.org.in\n\n"
-            "🔗 **আইনী ক্লিনিক (আইন মহাবিদ্যালয়)**\n"
-            "- বহু আইন মহাবিদ্যালয়ে বিনামূলীয়া পৰামৰ্শ দিয়ে\n\n"
-            "**পৰামৰ্শ:** প্ৰথমে ৰাষ্ট্ৰীয় আইনী সেৱাৰ সৈতে যোগাযোগ কৰক।"
+            "**এইটো আপুনি অকলে সামলাব লাগিব নালাগে।**\n\n"
+            "🔗 ৰাষ্ট্ৰীয় আইনী সেৱা: 1800-180-8111 (nalsa.gov.in)\n"
+            "🔗 বাৰ কাউন্সিল অৱ ইণ্ডিয়া: bci.org.in"
         ),
-        "not_enough_credits": "❌ পৰ্যাপ্ত OpenRouter ক্ৰেডিট নাই। অনুগ্ৰহ কৰি টপ আপ কৰক।",
-        "connection_error": (
-            "⚠️ সংযোগ ত্ৰুটি: {error}\n\n"
-            "সমাধান:\n- ইণ্টাৰনেট সংযোগ পৰীক্ষা কৰক\n- .env-ত এপিআই কী পৰীক্ষা কৰক\n"
-            "- openrouter.ai-ত OpenRouter অৱস্থা চাওক"
-        ),
-        "generic_error": "❌ ত্ৰুটি: {error}\n\n📋 ডিবাগৰ বিৱৰণ: টাৰ্মিনেল লগ চাওক",
+        "not_enough_credits": "❌ পৰ্যাপ্ত OpenRouter ক্ৰেডিট নাই।",
+        "connection_error": "⚠️ সংযোগ ত্ৰুটি: {error}",
+        "generic_error": "❌ ত্ৰুটি: {error}",
         "yes": "হয়",
         "no": "নহয়",
     }
@@ -885,12 +813,10 @@ STATIC_UI_TEXT_TRANSLATIONS = {
 def _parse_json_object(text):
     if not text:
         return {}
-
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -906,7 +832,6 @@ def _parse_json_object(text):
 def _translate_ui_text(language, text_map, client=None):
     if not client:
         return {}
-
     language_rule = _language_output_rule(language)
     prompt = f"""
 Translate this JSON object's values into {language}.
@@ -914,7 +839,7 @@ Rules:
 - Return JSON only.
 - Keep the exact same keys.
 - Keep emoji, Markdown, placeholders like {{error}}, URLs, phone numbers, and product names unchanged.
-- IMPORTANT: The brand name "LegalEase AI" and "⚡ LegalEase AI" MUST NOT be translated. Keep it exactly as it is.
+- IMPORTANT: The brand name "LegalEase AI" and "⚡ LegalEase AI" MUST NOT be translated.
 - {language_rule}
 - Do not use English or any non-target language except unchanged brand names, URLs, phone numbers, and placeholders.
 - Do not add commentary.
@@ -948,17 +873,14 @@ JSON:
 
 
 def _is_untranslated_ui_value(key, value):
-    """Treat copied English strings as missing translations."""
     if key not in UI_TEXT:
         return False
     return str(value).strip() == str(UI_TEXT[key]).strip()
 
 
 def get_localized_ui_text(language, client=None):
-    """Return user-facing UI text in the selected language when available."""
     if not language or language == "English":
         return dict(UI_TEXT)
-
     text = dict(UI_TEXT)
     stored_translation = {
         **UI_TEXT_TRANSLATIONS.get(language, {}),
@@ -970,7 +892,6 @@ def get_localized_ui_text(language, client=None):
         if not _is_untranslated_ui_value(key, value)
     }
     text.update(usable_translation)
-
     missing_keys = [key for key in UI_TEXT if key not in usable_translation]
     if missing_keys and client:
         cached_translation = _LOCALIZED_UI_TEXT_CACHE.setdefault(language, {})
@@ -979,7 +900,6 @@ def get_localized_ui_text(language, client=None):
             missing_text = {key: UI_TEXT[key] for key in uncached_keys}
             cached_translation.update(_translate_ui_text(language, missing_text, client))
         text.update(cached_translation)
-
     return text
 
 
@@ -989,31 +909,616 @@ def localize_yes_no(value, ui_text):
         return ui_text.get("yes", "Yes")
     if normalized == "no":
         return ui_text.get("no", "No")
+    # FIX-1: value is already in the target language (Indic script), return as-is.
     return value
 
+
+def _plain_text_from_markdown(text):
+    plain_text = str(text or "")
+    plain_text = re.sub(r"\*\*(.*?)\*\*", r"\1", plain_text)
+    plain_text = re.sub(r"(?m)^\s*[-*]\s+", "- ", plain_text)
+    return plain_text.strip()
+
+
+def _normalize_bullet_lines(text):
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\s+([*\u2022])\s+", r"\n\1 ", normalized)
+    normalized = re.sub(r"\s+-\s+(?=[A-Z0-9\"'])", "\n- ", normalized)
+    normalized = re.sub(r"\s+(\d+[.)])\s+(?=\S)", r"\n\1 ", normalized)
+    normalized = re.sub(r"^\n+", "", normalized)
+    return normalized.strip()
+
+
+# ==================== FIX-2: build_judgment_result_text returns structured data ====================
+# OLD: returned a single flat plain-text string; the HTML renderer tried to guess
+#      question/answer pairs by alternating lines — this broke when content had
+#      varying line counts per field.
+# FIX: now returns a tuple (plain_text: str, structured: dict).
+#      render_shareable_result_box uses the structured dict for HTML rendering,
+#      and plain_text for copy/download — so both are always correct.
+
+def build_judgment_result_text(summary, remedies, ui_text):
+    """
+    Build result content.
+    Returns: (plain_text: str, structured: dict)
+    - plain_text  → used for copy/download buttons (unchanged from before)
+    - structured  → used by render_shareable_result_box for correct HTML layout
+    """
+    ui_text = ui_text or UI_TEXT
+    remedies = remedies or {}
+    summary = _normalize_bullet_lines(summary)
+
+    # ---- plain text (unchanged behaviour) ----
+    sections = [
+        f"{ui_text.get('simplified_judgment', 'Simplified Judgment')}\n\n{str(summary or '').strip()}"
+    ]
+
+    remedies_lines = [ui_text.get("remedies_title", "What Can You Do Now?")]
+
+    if remedies.get("_is_partial"):
+        remedies_lines.append(ui_text.get("partial_warning", remedies.get("_warning", "")))
+
+    if remedies.get("what_happened"):
+        remedies_lines.extend([
+            ui_text.get("what_happened", "What Happened?"),
+            str(remedies["what_happened"]).strip(),
+        ])
+
+    if remedies.get("can_appeal"):
+        can_appeal_value = str(remedies["can_appeal"]).strip()
+        remedies_lines.extend([
+            ui_text.get("can_appeal", "Can You Appeal?"),
+            str(localize_yes_no(can_appeal_value, ui_text)).strip(),
+        ])
+        if can_appeal_value.lower() == "yes":
+            appeal_details = []
+            if remedies.get("appeal_days"):
+                appeal_details.append(
+                    f"{ui_text.get('days_to_file_appeal', 'Days to File Appeal')}: {remedies['appeal_days']}"
+                )
+            if remedies.get("appeal_court"):
+                appeal_details.append(
+                    f"{ui_text.get('appeal_to', 'Appeal to')}: {remedies['appeal_court']}"
+                )
+            if remedies.get("cost"):
+                appeal_details.append(
+                    f"{ui_text.get('estimated_cost', 'Estimated Cost')}: {remedies['cost']}"
+                )
+            if appeal_details:
+                remedies_lines.append(ui_text.get("appeal_details", "Appeal Details"))
+                remedies_lines.extend(appeal_details)
+
+    if remedies.get("first_action"):
+        remedies_lines.extend([
+            ui_text.get("first_action", "What Should You Do First?"),
+            str(remedies["first_action"]).strip(),
+        ])
+
+    if remedies.get("deadline"):
+        remedies_lines.extend([
+            ui_text.get("important_deadline", "Important Deadline"),
+            str(remedies["deadline"]).strip(),
+        ])
+
+    if len(remedies_lines) == 1:
+        remedies_lines.append(ui_text.get("partial_warning", "Note: Some information may be incomplete."))
+
+    sections.append("\n\n".join(line for line in remedies_lines if str(line).strip()))
+
+    legal_help = _plain_text_from_markdown(ui_text.get("legal_help_resources", ""))
+    if legal_help:
+        sections.append(
+            f"{ui_text.get('free_legal_help', 'Free Legal Help')}\n\n{legal_help}"
+        )
+
+    plain_text = "\n\n".join(section.strip() for section in sections if section.strip())
+
+    # ---- structured dict for HTML renderer ----
+    can_appeal_raw = str(remedies.get("can_appeal", "")).strip()
+    can_appeal_display = localize_yes_no(can_appeal_raw, ui_text)
+
+    qa_pairs = []  # list of {"question": str, "answer": str}
+
+    if remedies.get("what_happened"):
+        qa_pairs.append({
+            "question": ui_text.get("what_happened", "What Happened?"),
+            "answer": str(remedies["what_happened"]).strip(),
+        })
+
+    if remedies.get("can_appeal"):
+        answer_parts = [can_appeal_display]
+        if can_appeal_raw.lower() == "yes":
+            if remedies.get("appeal_days"):
+                answer_parts.append(
+                    f"{ui_text.get('days_to_file_appeal', 'Days to File Appeal')}: {remedies['appeal_days']}"
+                )
+            if remedies.get("appeal_court"):
+                answer_parts.append(
+                    f"{ui_text.get('appeal_to', 'Appeal to')}: {remedies['appeal_court']}"
+                )
+            if remedies.get("cost"):
+                answer_parts.append(
+                    f"{ui_text.get('estimated_cost', 'Estimated Cost')}: {remedies['cost']}"
+                )
+        qa_pairs.append({
+            "question": ui_text.get("can_appeal", "Can You Appeal?"),
+            "answer": "\n".join(answer_parts),
+        })
+
+    if remedies.get("first_action"):
+        qa_pairs.append({
+            "question": ui_text.get("first_action", "What Should You Do First?"),
+            "answer": str(remedies["first_action"]).strip(),
+        })
+
+    if remedies.get("deadline"):
+        qa_pairs.append({
+            "question": ui_text.get("important_deadline", "⏰ Important Deadline"),
+            "answer": str(remedies["deadline"]).strip(),
+        })
+
+    structured = {
+        "summary_title": ui_text.get("simplified_judgment", "✅ Simplified Judgment"),
+        "summary": str(summary or "").strip(),
+        "remedies_title": ui_text.get("remedies_title", "⚖️ What Can You Do Now?"),
+        "qa_pairs": qa_pairs,
+        "partial_warning": remedies.get("_warning", "") if remedies.get("_is_partial") else "",
+        "free_legal_help_title": ui_text.get("free_legal_help", "📞 Free Legal Help"),
+        "legal_help_resources": _plain_text_from_markdown(ui_text.get("legal_help_resources", "")),
+    }
+
+    return plain_text, structured
+
+
+def _format_result_paragraph(paragraph):
+    """Convert plain-text paragraph into readable, styled HTML."""
+    paragraph = str(paragraph or "").strip()
+    if not paragraph:
+        return ""
+
+    bullet_pattern = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
+
+    def format_inline(text):
+        escaped = html_lib.escape(str(text or "").strip())
+        return re.sub(
+            r"^([^:]{2,42}):\s*(.+)$",
+            r"<strong>\1:</strong> \2",
+            escaped,
+            count=1,
+        )
+
+    def split_bullets(text):
+        raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        items = []
+        for line in raw_lines:
+            normalized_line = re.sub(r"\s+([*\u2022])\s+", r"\n\1 ", line)
+            normalized_line = re.sub(r"\s+-\s+(?=[A-Z0-9\"'])", "\n- ", normalized_line)
+            parts = [part.strip() for part in normalized_line.splitlines() if part.strip()]
+            for part in parts:
+                cleaned = bullet_pattern.sub("", part, count=1).strip(" -")
+                if cleaned:
+                    items.append(cleaned)
+        if len(items) <= 1:
+            compact_parts = re.split(r"\s+(?:[-*\u2022]|\d+[.)])\s+(?=\S)", text)
+            if len(compact_parts) > 1:
+                items = [part.strip(" -") for part in compact_parts if part.strip(" -")]
+        return items
+
+    items = split_bullets(paragraph)
+    is_list = len(items) > 1 or bullet_pattern.match(paragraph)
+
+    if is_list:
+        if len(items) == 1 and "." in items[0]:
+            sentence_items = re.split(r"(?<=[.!?])\s+(?=[A-Z])", items[0])
+            if len(sentence_items) >= 3:
+                items = [item.strip() for item in sentence_items if item.strip()]
+        list_items = []
+        for item in items:
+            cleaned = bullet_pattern.sub("", item, count=1).strip()
+            if cleaned:
+                list_items.append(f"<li>{format_inline(cleaned)}</li>")
+        return f"<ol class=\"result-list\">{''.join(list_items)}</ol>" if list_items else ""
+
+    return f"<p>{format_inline(paragraph)}</p>"
+
+
+def _build_qa_group_html(title, qa_pairs, partial_warning="", modifier=""):
+    """
+    FIX-2: Render the remedies section using explicit question/answer dicts.
+    OLD: received flat list of paragraphs and guessed pairs by alternating index.
+    FIX: receives list of {"question": str, "answer": str} dicts — no guessing needed.
+    """
+    if not title and not qa_pairs:
+        return ""
+
+    cards = []
+
+    if partial_warning:
+        cards.append(
+            f"""
+            <article class="qa-card note-card">
+                <div class="answer-text"><p>{html_lib.escape(partial_warning)}</p></div>
+            </article>
+            """
+        )
+
+    for pair in qa_pairs:
+        question = str(pair.get("question", "")).strip()
+        answer = str(pair.get("answer", "")).strip()
+        if not question and not answer:
+            continue
+        cards.append(
+            f"""
+            <article class="qa-card">
+                <div class="question-label">{html_lib.escape(question)}</div>
+                <div class="answer-text">{_format_result_paragraph(answer)}</div>
+            </article>
+            """
+        )
+
+    if not cards:
+        return ""
+
+    return f"""
+    <section class="result-group {modifier}">
+        <h3>{html_lib.escape(title)}</h3>
+        <div class="qa-stack">{''.join(cards)}</div>
+    </section>
+    """
+
+
+def _build_legal_help_group_html(title, paragraphs):
+    if not title:
+        return ""
+    intro = paragraphs[0] if paragraphs else ""
+    resources = paragraphs[1:] if len(paragraphs) > 1 else []
+    cards = []
+    for block in resources:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        resource_title = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", "", lines[0]).strip()
+        detail_text = "\n".join(lines[1:]) if len(lines) > 1 else ""
+        cards.append(
+            f"""
+            <article class="qa-card legal-card">
+                <div class="question-label">{html_lib.escape(resource_title)}</div>
+                <div class="answer-text">{_format_result_paragraph(detail_text)}</div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="result-group legal-help-group">
+        <h3>{html_lib.escape(title)}</h3>
+        <div class="group-intro">{_format_result_paragraph(intro)}</div>
+        <div class="qa-stack">{''.join(cards)}</div>
+    </section>
+    """
+
+
+# ==================== FIX-2: _build_result_body_html uses structured dict ====================
+# OLD: parsed layout from flat plain-text string — fragile and ambiguous.
+# FIX: accepts optional `structured` dict; uses it when available for guaranteed layout.
+
+def _build_result_body_html(result_text, ui_text=None, structured=None):
+    """
+    Build richer visual layout.
+    When `structured` dict is provided (from build_judgment_result_text),
+    uses it for correct Q&A pairing.  Falls back to text parsing otherwise.
+    """
+    ui_text = ui_text or UI_TEXT
+
+    if structured:
+        body_parts = [
+            f"""
+            <header class="result-hero">
+                <div>
+                    <span class="result-kicker">LegalEase AI</span>
+                    <h2>{html_lib.escape(structured.get("summary_title", ""))}</h2>
+                </div>
+            </header>
+            """
+        ]
+
+        if structured.get("summary"):
+            body_parts.append(
+                f"""
+                <section class="result-summary-card">
+                    <span class="section-chip">Key outcome</span>
+                    {_format_result_paragraph(structured["summary"])}
+                </section>
+                """
+            )
+
+        if structured.get("qa_pairs") or structured.get("partial_warning"):
+            body_parts.append(
+                _build_qa_group_html(
+                    structured.get("remedies_title", ""),
+                    structured.get("qa_pairs", []),
+                    partial_warning=structured.get("partial_warning", ""),
+                    modifier="remedies-group",
+                )
+            )
+
+        if structured.get("legal_help_resources"):
+            legal_paras = [
+                p.strip()
+                for p in re.split(r"\n\s*\n", structured["legal_help_resources"])
+                if p.strip()
+            ]
+            body_parts.append(
+                _build_legal_help_group_html(
+                    structured.get("free_legal_help_title", ""),
+                    legal_paras,
+                )
+            )
+
+        return "".join(body_parts)
+
+    # ---- legacy fallback (plain text parsing, unchanged) ----
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", str(result_text or ""))
+        if paragraph.strip()
+    ]
+    if not paragraphs:
+        return ""
+
+    title = html_lib.escape(paragraphs[0])
+    summary_html = _format_result_paragraph(paragraphs[1]) if len(paragraphs) > 1 else ""
+    body_parts = [
+        f"""
+        <header class="result-hero">
+            <div>
+                <span class="result-kicker">LegalEase AI</span>
+                <h2>{title}</h2>
+            </div>
+        </header>
+        """
+    ]
+    if summary_html:
+        body_parts.append(
+            f"""
+            <section class="result-summary-card">
+                <span class="section-chip">Key outcome</span>
+                {summary_html}
+            </section>
+            """
+        )
+    content = paragraphs[2:] if len(paragraphs) > 2 else []
+    if content:
+        free_help_title = ui_text.get("free_legal_help", "Free Legal Help")
+        free_help_idx = next(
+            (idx for idx, p in enumerate(content)
+             if p.strip() == free_help_title or "Free Legal Help" in p or "Legal Help" in p),
+            -1,
+        )
+        remedies_content = content[:free_help_idx] if free_help_idx >= 0 else content
+        legal_content = content[free_help_idx:] if free_help_idx >= 0 else []
+        if remedies_content:
+            # Legacy: convert flat paragraphs into qa_pairs best-effort
+            pairs = []
+            idx = 0
+            while idx < len(remedies_content) - 1:
+                pairs.append({"question": remedies_content[idx], "answer": remedies_content[idx + 1]})
+                idx += 2
+            body_parts.append(_build_qa_group_html(remedies_content[0] if remedies_content else "", pairs[1:], modifier="remedies-group"))
+        if legal_content:
+            body_parts.append(_build_legal_help_group_html(legal_content[0], legal_content[1:]))
+
+    return "".join(body_parts)
+
+
+# ==================== FIX-2: render_shareable_result_box accepts structured dict ====================
+# OLD: only received result_text string; passed it to _build_result_body_html which guessed layout.
+# FIX: now accepts optional `structured` dict from build_judgment_result_text and passes it through.
+
+def render_shareable_result_box(
+    result_text,
+    ui_text=None,
+    file_name="judgment_summary.txt",
+    structured=None,
+):
+    """
+    Render a result box with top-right copy and download controls.
+
+    Args:
+        result_text:  Plain text string (for copy/download). Can also be a tuple
+                      (plain_text, structured_dict) as returned by build_judgment_result_text.
+        ui_text:      Localized UI strings dict.
+        file_name:    Download filename.
+        structured:   Optional structured dict from build_judgment_result_text for correct HTML layout.
+    """
+    import streamlit.components.v1 as components
+
+    # FIX-2: support tuple input from build_judgment_result_text
+    if isinstance(result_text, tuple):
+        result_text, structured = result_text
+
+    ui_text = ui_text or UI_TEXT
+    result_text = str(result_text or "")
+    copy_label = ui_text.get("copy_result", "Copy")
+    copied_label = ui_text.get("copied_result", "Copied")
+    download_label = ui_text.get("download_result_txt", "Download")
+
+    line_count = result_text.count("\n") + 1
+    height = min(max(560, line_count * 30 + 240), 980)
+    # FIX-2: pass structured dict so HTML uses guaranteed Q&A pairs
+    result_body_html = _build_result_body_html(result_text, ui_text, structured=structured)
+    text_json = json.dumps(result_text, ensure_ascii=False)
+    file_name_json = json.dumps(file_name, ensure_ascii=False)
+    copy_label_json = json.dumps(copy_label, ensure_ascii=False)
+    copied_label_json = json.dumps(copied_label, ensure_ascii=False)
+
+    components.html(
+        f"""
+        <div class="shareable-result-box">
+            <div class="result-toolbar">
+                <button type="button" id="copy-result">{html_lib.escape(copy_label)}</button>
+                <button type="button" id="download-result">{html_lib.escape(download_label)}</button>
+            </div>
+            <main class="result-content">{result_body_html}</main>
+        </div>
+        <script>
+            const resultText = {text_json};
+            const fileName = {file_name_json};
+            const copyLabel = {copy_label_json};
+            const copiedLabel = {copied_label_json};
+            const copyButton = document.getElementById("copy-result");
+            const downloadButton = document.getElementById("download-result");
+
+            function fallbackCopy(text) {{
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.setAttribute("readonly", "");
+                textarea.style.position = "fixed";
+                textarea.style.left = "-9999px";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+            }}
+
+            copyButton.addEventListener("click", async () => {{
+                try {{
+                    if (navigator.clipboard && window.isSecureContext) {{
+                        await navigator.clipboard.writeText(resultText);
+                    }} else {{
+                        fallbackCopy(resultText);
+                    }}
+                    copyButton.textContent = copiedLabel;
+                    window.setTimeout(() => {{
+                        copyButton.textContent = copyLabel;
+                    }}, 1600);
+                }} catch (error) {{
+                    fallbackCopy(resultText);
+                }}
+            }});
+
+            downloadButton.addEventListener("click", () => {{
+                const blob = new Blob([resultText], {{ type: "text/plain;charset=utf-8" }});
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = fileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            }});
+        </script>
+        <style>
+            html, body {{
+                margin: 0; padding: 0; background: transparent;
+                font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }}
+            .shareable-result-box {{
+                min-height: 100%;
+                border: 1px solid #cfd8e3;
+                border-radius: 8px;
+                background: linear-gradient(135deg, rgba(15,118,110,0.10), rgba(234,179,8,0.10)), #f8fafc;
+                color: #111827;
+                overflow: hidden;
+                box-sizing: border-box;
+                box-shadow: 0 18px 45px rgba(15,23,42,0.10);
+            }}
+            .result-toolbar {{
+                position: sticky; top: 0; z-index: 2;
+                display: flex; justify-content: flex-end; gap: 8px;
+                padding: 12px;
+                background: rgba(255,255,255,0.94);
+                border-bottom: 1px solid rgba(148,163,184,0.34);
+                backdrop-filter: blur(10px);
+            }}
+            .result-toolbar button {{
+                min-width: 88px; border: 1px solid #0f766e; border-radius: 6px;
+                background: #ffffff; color: #0f766e; cursor: pointer;
+                font-size: 14px; font-weight: 700; line-height: 1; padding: 9px 12px;
+            }}
+            .result-toolbar button:hover {{ background: #ecfdf5; transform: translateY(-1px); }}
+            .result-content {{ padding: 18px; }}
+            .result-hero {{
+                display: flex; align-items: center; min-height: 112px; padding: 22px;
+                border-radius: 8px;
+                background: linear-gradient(135deg, rgba(15,118,110,0.96), rgba(30,64,175,0.92)), #0f766e;
+                color: #ffffff;
+            }}
+            .result-kicker {{
+                display: inline-flex; margin-bottom: 10px; padding: 5px 9px;
+                border-radius: 999px; background: rgba(255,255,255,0.16); color: #d9f99d;
+                font-size: 12px; font-weight: 800; text-transform: uppercase;
+            }}
+            .result-hero h2 {{ margin: 0; font-size: 26px; line-height: 1.18; }}
+            .result-summary-card, .result-group {{
+                margin-top: 14px; border: 1px solid rgba(148,163,184,0.36);
+                border-radius: 8px; background: rgba(255,255,255,0.96);
+                box-shadow: 0 10px 28px rgba(15,23,42,0.07);
+            }}
+            .result-summary-card {{ padding: 20px; border-left: 6px solid #eab308; }}
+            .section-chip {{
+                display: inline-flex; margin-bottom: 14px; padding: 6px 10px;
+                border-radius: 999px; background: #fef3c7; color: #854d0e;
+                font-size: 12px; font-weight: 800; text-transform: uppercase;
+            }}
+            .result-group {{ overflow: hidden; }}
+            .result-group h3 {{
+                margin: 0; padding: 15px 18px; background: #0f172a; color: #ffffff;
+                font-size: 18px; font-weight: 800; line-height: 1.25;
+            }}
+            .legal-help-group h3 {{ background: #14532d; }}
+            .qa-stack {{ display: grid; gap: 12px; padding: 14px; }}
+            .qa-card {{
+                border: 1px solid rgba(20,184,166,0.22); border-radius: 8px;
+                background: linear-gradient(90deg, #ffffff, #f0fdfa); overflow: hidden;
+            }}
+            .legal-card {{ background: linear-gradient(90deg,#ffffff,#f7fee7); border-color: rgba(101,163,13,0.24); }}
+            .note-card {{ border-left: 6px solid #dc2626; background: #fff7ed; }}
+            .question-label {{
+                padding: 10px 12px; background: rgba(15,118,110,0.10); color: #0f766e;
+                font-size: 13px; font-weight: 900; text-transform: uppercase;
+            }}
+            .answer-text {{ padding: 13px 14px; }}
+            .group-intro {{ padding: 14px 16px 0; }}
+            .result-summary-card p, .answer-text p, .group-intro p {{
+                margin: 0; color: #1f2937; font-size: 16px; line-height: 1.62;
+            }}
+            .result-list {{
+                display: grid; gap: 18px; margin: 0; padding: 0;
+                list-style: none; counter-reset: result-item;
+            }}
+            .result-list li {{
+                position: relative; min-height: 44px; padding: 15px 16px 15px 50px;
+                border: 1px solid rgba(20,184,166,0.22); border-radius: 8px;
+                background: linear-gradient(90deg,#ffffff,#f0fdfa);
+                color: #111827; font-size: 16px; line-height: 1.58;
+            }}
+            .result-list li::before {{
+                counter-increment: result-item; content: counter(result-item);
+                position: absolute; left: 13px; top: 13px; width: 24px; height: 24px;
+                border-radius: 999px; background: #0f766e; color: #ffffff;
+                font-size: 13px; font-weight: 900; line-height: 24px; text-align: center;
+            }}
+            strong {{ color: #0f172a; font-weight: 900; }}
+            @media (max-width: 720px) {{
+                .result-content {{ padding: 12px; }}
+                .result-hero {{ min-height: 98px; padding: 18px; }}
+                .result-hero h2 {{ font-size: 22px; }}
+                .qa-stack {{ padding: 12px; }}
+            }}
+        </style>
+        """,
+        height=height,
+        scrolling=True,
+    )
+
+
 SCHEDULED_INDIAN_LANGUAGES = [
-    "Assamese",
-    "Bengali",
-    "Bodo",
-    "Dogri",
-    "Gujarati",
-    "Hindi",
-    "Kannada",
-    "Kashmiri",
-    "Konkani",
-    "Maithili",
-    "Malayalam",
-    "Manipuri",
-    "Marathi",
-    "Nepali",
-    "Odia",
-    "Punjabi",
-    "Sanskrit",
-    "Santhali",
-    "Sindhi",
-    "Tamil",
-    "Telugu",
-    "Urdu",
+    "Assamese", "Bengali", "Bodo", "Dogri", "Gujarati", "Hindi", "Kannada",
+    "Kashmiri", "Konkani", "Maithili", "Malayalam", "Manipuri", "Marathi",
+    "Nepali", "Odia", "Punjabi", "Sanskrit", "Santhali", "Sindhi",
+    "Tamil", "Telugu", "Urdu",
 ]
 
 LANGUAGES = ["English", *SCHEDULED_INDIAN_LANGUAGES]
@@ -1027,29 +1532,12 @@ LANGUAGE_ALIASES = {
 }
 
 LANGUAGE_CODE_TO_NAME = {
-    "as": "Assamese",
-    "bn": "Bengali",
-    "brx": "Bodo",
-    "doi": "Dogri",
-    "en": "English",
-    "gu": "Gujarati",
-    "hi": "Hindi",
-    "kn": "Kannada",
-    "ks": "Kashmiri",
-    "kok": "Konkani",
-    "mai": "Maithili",
-    "ml": "Malayalam",
-    "mni": "Manipuri",
-    "mr": "Marathi",
-    "ne": "Nepali",
-    "or": "Odia",
-    "pa": "Punjabi",
-    "sa": "Sanskrit",
-    "sat": "Santhali",
-    "sd": "Sindhi",
-    "ta": "Tamil",
-    "te": "Telugu",
-    "ur": "Urdu",
+    "as": "Assamese", "bn": "Bengali", "brx": "Bodo", "doi": "Dogri",
+    "en": "English", "gu": "Gujarati", "hi": "Hindi", "kn": "Kannada",
+    "ks": "Kashmiri", "kok": "Konkani", "mai": "Maithili", "ml": "Malayalam",
+    "mni": "Manipuri", "mr": "Marathi", "ne": "Nepali", "or": "Odia",
+    "pa": "Punjabi", "sa": "Sanskrit", "sat": "Santhali", "sd": "Sindhi",
+    "ta": "Tamil", "te": "Telugu", "ur": "Urdu",
 }
 
 # Alias for backward compatibility

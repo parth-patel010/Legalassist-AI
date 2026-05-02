@@ -25,6 +25,8 @@ from core.app_utils import (
     get_remedies_advice,
     get_localized_ui_text,
     localize_yes_no,
+    build_judgment_result_text,
+    render_shareable_result_box,
     LANGUAGES,
 )
 
@@ -251,8 +253,8 @@ def main():
                 if not summary:
                     st.error(ui["empty_summary"])
                 else:
-                    st.markdown(f"## {ui['simplified_judgment']}")
-                    st.write(summary)
+                    summary_result_text = build_judgment_result_text(summary, {}, ui)
+                    render_shareable_result_box(summary_result_text, ui)
                     st.success(ui["summary_success"])
                     
                     # ===== REMEDIES SECTION =====

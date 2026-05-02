@@ -19,6 +19,8 @@ from .app_utils import (
     UI_TEXT,
     get_localized_ui_text,
     localize_yes_no,
+    build_judgment_result_text,
+    render_shareable_result_box,
     RETRO_STYLING,
     LEGAL_HELP_RESOURCES,
 )
@@ -43,6 +45,8 @@ __all__ = [
     'UI_TEXT',
     'get_localized_ui_text',
     'localize_yes_no',
+    'build_judgment_result_text',
+    'render_shareable_result_box',
     'RETRO_STYLING',
     'LEGAL_HELP_RESOURCES',
 ]

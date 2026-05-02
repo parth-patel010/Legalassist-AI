@@ -1,12 +1,14 @@
 """
 Home page - Judgment Analysis (Main page)
 This is the primary feature of LegalEase AI
+
+CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
+        render_shareable_result_box accepts the tuple directly — no other changes needed.
 """
 
 import streamlit as st
 import logging
 
-# Import utilities from core
 from core.app_utils import (
     get_client,
     extract_text_from_pdf,
@@ -19,29 +21,26 @@ from core.app_utils import (
     extract_appeal_info,
     get_localized_ui_text,
     localize_yes_no,
+    build_judgment_result_text,
+    render_shareable_result_box,
     RETRO_STYLING,
     LANGUAGES,
 )
 
-# Apply styling
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
 
 
 def render_page():
-    """Render the judgment analysis page"""
-    # Get client early for translation
     client = get_client()
-    
+
     current_language = st.session_state.get("judgment_language", "English")
     ui = get_localized_ui_text(current_language, client)
 
     st.title("⚡ LegalEase AI")
     st.subheader(ui["app_subtitle"])
-
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    # Input section
     language = st.selectbox(ui["language_label"], LANGUAGES, key="judgment_language")
     ui = get_localized_ui_text(language, client)
     uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
@@ -50,7 +49,6 @@ def render_page():
     if uploaded_file and st.button(ui["generate_summary"], use_container_width=True):
         with st.spinner(ui["processing"]):
             try:
-                # Get client
                 try:
                     client = get_client()
                     ui = get_localized_ui_text(language, client)
@@ -58,19 +56,17 @@ def render_page():
                     st.error(f"❌ {ui['api_client_failed']}: {str(e)}")
                     return
 
-                # Extract and process text
                 raw_text = extract_text_from_pdf(uploaded_file)
                 safe_text = compress_text(raw_text)
 
                 prompt = build_prompt(safe_text, language)
                 model_id = "meta-llama/llama-3.1-8b-instruct"
 
-                # First attempt
                 response = client.chat.completions.create(
                     model=model_id,
                     messages=[
                         {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
-                        {"role": "user", "content": prompt}
+                        {"role": "user", "content": prompt},
                     ],
                     max_tokens=280,
                     temperature=0.05,
@@ -78,14 +74,13 @@ def render_page():
 
                 summary = response.choices[0].message.content.strip()
 
-                # Retry if English leakage detected
                 if language.lower() != "english" and output_language_mismatch_detected(summary, language):
                     retry_prompt = build_retry_prompt(safe_text, language)
                     response2 = client.chat.completions.create(
                         model=model_id,
                         messages=[
                             {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
-                            {"role": "user", "content": retry_prompt}
+                            {"role": "user", "content": retry_prompt},
                         ],
                         max_tokens=260,
                         temperature=0.03,
@@ -97,81 +92,49 @@ def render_page():
                 if not summary:
                     st.error(ui["empty_summary"])
                 else:
-                    # Display results
-                    st.markdown(f"## {ui['simplified_judgment']}")
-                    st.write(summary)
-                    st.success(ui["summary_success"])
-                    
-                    # ===== REMEDIES SECTION =====
-                    st.markdown("---")
-                    st.markdown(f"## {ui['remedies_title']}")
-                    
+                    remedies = {}
+
                     with st.spinner(ui["remedies_spinner"]):
                         try:
-                            remedies = get_remedies_advice(raw_text, language, client)
-                            
-                            if remedies.get("what_happened"):
-                                st.subheader(ui["what_happened"])
-                                st.write(remedies["what_happened"])
-                            
-                            if remedies.get("can_appeal"):
-                                st.subheader(ui["can_appeal"])
-                                can_appeal_value = remedies["can_appeal"]
-                                st.write(localize_yes_no(can_appeal_value, ui))
-                                
-                                if can_appeal_value.strip().lower() == "yes":
-                                    st.subheader(ui["appeal_details"])
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        if remedies.get("appeal_days"):
-                                            st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
-                                        if remedies.get("appeal_court"):
-                                            st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
-                                    with col2:
-                                        if remedies.get("cost"):
-                                            st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
-                            
-                            if remedies.get("first_action"):
-                                st.subheader(ui["first_action"])
-                                st.write(f"✅ {remedies['first_action']}")
-                            
-                            if remedies.get("deadline"):
-                                st.subheader(ui["important_deadline"])
-                                st.write(remedies["deadline"])
-                            
+                            remedies = get_remedies_advice(raw_text, language, client) or {}
                         except Exception as e:
                             st.error(f"{ui['remedies_error']}: {str(e)}")
-                    
+
+                    # build_judgment_result_text now returns (plain_text, structured_dict)
+                    result = build_judgment_result_text(summary, remedies, ui)
+
+                    # render_shareable_result_box accepts the tuple directly
+                    render_shareable_result_box(result, ui)
+                    st.success(ui["summary_success"])
+
                     # ===== ANALYTICS & TRACKING SECTION =====
                     st.markdown("---")
                     st.markdown(f"## {ui['track_title']}")
-                    
                     st.info(ui["track_info"])
-                    
+
                     col1, col2, col3 = st.columns(3)
-                    
+
                     with col1:
                         if st.button(ui["view_analytics"], key="view_analytics"):
                             st.session_state.show_analytics = True
-                    
+
                     with col2:
                         if st.button(ui["estimate_chances"], key="estimate_chances"):
                             st.session_state.show_estimator = True
-                    
+
                     with col3:
                         if st.button(ui["report_outcome"], key="report_outcome"):
                             st.session_state.show_feedback = True
-                    
-                    # Show analytics if requested
+
                     if st.session_state.get("show_analytics"):
                         st.subheader(ui["quick_analytics_preview"])
                         try:
                             from analytics_engine import AnalyticsAggregator
                             from database import SessionLocal
-                            
+
                             db = SessionLocal()
                             summary_data = AnalyticsAggregator.get_dashboard_summary(db)
-                            
+
                             if summary_data.get("total_cases_processed", 0) > 0:
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
@@ -182,19 +145,13 @@ def render_page():
                                     st.metric(ui["appeals_success_rate"], f"{success_rate}%")
                                 with col3:
                                     st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
-                                
                                 st.write(f"📌 **{ui['analytics_link_text']}**")
                             else:
                                 st.info(ui["analytics_empty"])
-                            
+
                             db.close()
                         except Exception as e:
                             st.info(ui["analytics_not_ready"])
-                    
-                    # ===== FREE LEGAL HELP SECTION =====
-                    st.markdown("---")
-                    st.markdown(f"## {ui['free_legal_help']}")
-                    st.info(ui["legal_help_resources"])
 
             except Exception as e:
                 err = str(e)

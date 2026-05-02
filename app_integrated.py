@@ -205,55 +205,18 @@ def show_judgment_analysis():
                 if not summary:
                     st.error(ui["empty_summary"])
                 else:
-                    st.markdown(f"## {ui['simplified_judgment']}")
-                    st.write(summary)
-                    st.success(ui["summary_success"])
-                    
-                    # ===== REMEDIES SECTION =====
-                    st.markdown("---")
-                    st.markdown(f"## {ui['remedies_title']}")
+                    remedies = {}
                     
                     with st.spinner(ui["remedies_spinner"]):
                         try:
-                            remedies = get_remedies_advice(raw_text, language, client)
-                            
-                            if remedies.get("what_happened"):
-                                st.subheader(ui["what_happened"])
-                                st.write(remedies["what_happened"])
-                            
-                            if remedies.get("can_appeal"):
-                                st.subheader(ui["can_appeal"])
-                                can_appeal_value = remedies["can_appeal"]
-                                st.write(core.localize_yes_no(can_appeal_value, ui))
-                                
-                                if can_appeal_value.strip().lower() == "yes":
-                                    st.subheader(ui["appeal_details"])
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        if remedies.get("appeal_days"):
-                                            st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
-                                        if remedies.get("appeal_court"):
-                                            st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
-                                    with col2:
-                                        if remedies.get("cost"):
-                                            st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
-                            
-                            if remedies.get("first_action"):
-                                st.subheader(ui["first_action"])
-                                st.write(f"✅ {remedies['first_action']}")
-                            
-                            if remedies.get("deadline"):
-                                st.subheader(ui["important_deadline"])
-                                st.write(remedies["deadline"])
-                            
+                            remedies = get_remedies_advice(raw_text, language, client) or {}
                         except Exception as e:
                             st.error(f"{ui['remedies_error']}: {str(e)}")
-                    
-                    # ===== FREE LEGAL HELP SECTION =====
-                    st.markdown("---")
-                    st.markdown(f"## {ui['free_legal_help']}")
-                    st.info(ui["legal_help_resources"])
 
+                    result_text = core.build_judgment_result_text(summary, remedies, ui)
+                    core.render_shareable_result_box(result_text, ui)
+                    st.success(ui["summary_success"])
+                    
             except Exception as e:
                 err = str(e)
                 logger.error(f"Full error in judgment analysis: {err}", exc_info=True)
