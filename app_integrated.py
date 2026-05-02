@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== DATABASE & SCHEDULER SETUP ====================
 from database import init_db
-from scheduler import start_scheduler, stop_scheduler
+from scheduler import start_scheduler
 
 # Initialize database
 try:
@@ -34,16 +34,6 @@ try:
     logger.info("Database initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize database: {str(e)}")
-
-# Start background scheduler on app startup
-if "scheduler_started" not in st.session_state:
-    try:
-        start_scheduler()
-        st.session_state.scheduler_started = True
-        logger.info("Background scheduler started")
-    except Exception as e:
-        logger.error(f"Failed to start scheduler: {str(e)}")
-        st.session_state.scheduler_started = False
 
 # ==================== Logging Setup ====================
 logging.basicConfig(
@@ -79,12 +69,6 @@ def main():
     st.sidebar.markdown("# ⚖️ LegalEase AI")
     st.sidebar.markdown("**Convert Judgments to Simple Language**")
     st.sidebar.divider()
-    
-    # Display scheduler status
-    if st.session_state.get("scheduler_started"):
-        st.sidebar.success("✅ Notifications: Active")
-    else:
-        st.sidebar.warning("⚠️ Notifications: Offline")
     
     st.sidebar.markdown("---")
     st.sidebar.markdown(
