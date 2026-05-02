@@ -57,6 +57,9 @@ st.set_page_config(
 
 # Using default Streamlit theme
 
+# ==================== File Upload Configuration ====================
+MAX_FILE_SIZE_MB = 10
+
 LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
 
 
@@ -163,6 +166,13 @@ def main():
 
     language = st.selectbox("🌐 Select your language", ["English", "Hindi", "Bengali", "Urdu"])
     uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    
+    if uploaded_file is not None:
+        file_size_mb = uploaded_file.size / (1024 * 1024)
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            st.error(f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
+            uploaded_file = None
+    
     st.markdown("---")
 
     generate_clicked = st.button("🚀 Generate Summary") if uploaded_file else False
