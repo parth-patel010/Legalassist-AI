@@ -60,6 +60,9 @@ st.set_page_config(
 
 # Using default Streamlit theme
 
+# ==================== File Upload Configuration ====================
+MAX_FILE_SIZE_MB = 10
+
 LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
 
 
