@@ -10,6 +10,7 @@ from .app_utils import (
     parse_remedies_response,
     extract_appeal_info,
     get_remedies_advice,
+    parse_summary_bullets,
     DEFAULT_MODEL,
     build_summary_prompt,
     LANGUAGES,
@@ -21,6 +22,7 @@ from .app_utils import (
     localize_yes_no,
     RETRO_STYLING,
     LEGAL_HELP_RESOURCES,
+    validate_pdf_metadata,
 )
 
 __all__ = [
@@ -34,6 +36,7 @@ __all__ = [
     'parse_remedies_response',
     'extract_appeal_info',
     'get_remedies_advice',
+    'parse_summary_bullets',
     'DEFAULT_MODEL',
     'build_summary_prompt',
     'LANGUAGES',
@@ -45,4 +48,5 @@ __all__ = [
     'localize_yes_no',
     'RETRO_STYLING',
     'LEGAL_HELP_RESOURCES',
+    'validate_pdf_metadata',
 ]

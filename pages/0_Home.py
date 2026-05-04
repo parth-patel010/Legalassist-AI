@@ -21,6 +21,8 @@ from core.app_utils import (
     localize_yes_no,
     RETRO_STYLING,
     LANGUAGES,
+    parse_summary_bullets,
+    validate_pdf_metadata,
 )
 
 # Apply styling
@@ -42,13 +44,21 @@ def render_page():
     st.markdown("---")
 
     # Input section
-    language = st.selectbox(ui["language_label"], LANGUAGES, key="judgment_language")
-    ui = get_localized_ui_text(language, client)
-    uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
+    language = st.selectbox("🌐 Select your language", LANGUAGES)
+    uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    
+    # PDF Validation for size and page count
+    is_valid_pdf, validation_msg, validation_level = validate_pdf_metadata(uploaded_file)
+    if validation_msg:
+        if validation_level == "error":
+            st.error(validation_msg)
+        else:
+            st.warning(validation_msg)
+
     st.markdown("---")
 
-    if uploaded_file and st.button(ui["generate_summary"], use_container_width=True):
-        with st.spinner(ui["processing"]):
+    if uploaded_file and is_valid_pdf and st.button("🚀 Generate Summary", use_container_width=True):
+        with st.spinner("Processing judgment…"):
             try:
                 # Get client
                 try:
@@ -76,7 +86,10 @@ def render_page():
                     temperature=0.05,
                 )
 
-                summary = response.choices[0].message.content.strip()
+                summary_raw = response.choices[0].message.content.strip()
+                # Use a structured parser to ensure exactly 3 bullet points 
+                # and remove any introductory text
+                summary = parse_summary_bullets(summary_raw)
 
                 # Retry if English leakage detected
                 if language.lower() != "english" and output_language_mismatch_detected(summary, language):
@@ -90,9 +103,9 @@ def render_page():
                         max_tokens=260,
                         temperature=0.03,
                     )
-                    retry_summary = response2.choices[0].message.content.strip()
-                    if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
-                        summary = retry_summary
+                    retry_summary_raw = response2.choices[0].message.content.strip()
+                    if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
+                        summary = parse_summary_bullets(retry_summary_raw)
 
                 if not summary:
                     st.error(ui["empty_summary"])
