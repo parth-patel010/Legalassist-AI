@@ -251,6 +251,10 @@ def show_judgment_analysis():
                     st.markdown(f"## {ui['free_legal_help']}")
                     st.info(ui["legal_help_resources"])
 
+                    result_text = core.build_judgment_result_text(summary, remedies, ui)
+                    core.render_shareable_result_box(result_text, ui)
+                    st.success(ui["summary_success"])
+                    
             except Exception as e:
                 err = str(e)
                 logger.error(f"Full error in judgment analysis: {err}", exc_info=True)

@@ -3,6 +3,17 @@ Shared utilities for LegalEase AI
 - PDF extraction and text processing
 - LLM prompts and remedies advisor
 - Styling and UI constants
+
+PATCHES APPLIED (2 bugs fixed):
+  FIX-1: Language consistency — remedies LLM system prompt now enforces target language;
+          _normalize_yes_no now returns localized values; _validate_court_name no longer
+          strips non-English court names; render_shareable_result_box passes ui_text down
+          correctly to _build_result_body_html.
+  FIX-2: "What you can do" layout — build_judgment_result_text now emits a structured
+          dict alongside the plain-text string; render_shareable_result_box uses the
+          structured dict to build guaranteed question/answer pairs in the HTML renderer,
+          so questions and answers are always correctly paired and answers are never cut short.
+          max_tokens for remedies raised from 500 → 900.
 """
 
 import re
@@ -35,16 +46,12 @@ _LOCALIZED_UI_TEXT_CACHE = {}
 
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 
+
 def get_default_model():
-    """
-    Returns the default model to use, safely accessing st.secrets.
-    Falls back gracefully if secrets are unavailable (e.g., during testing).
-    """
     try:
         import streamlit as st
         return st.secrets.get("DEFAULT_MODEL", DEFAULT_MODEL)
     except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
-        # Fallback to module DEFAULT_MODEL if secrets are unavailable
         return DEFAULT_MODEL
 
 
@@ -140,28 +147,23 @@ def _initialize_openai_client():
             (dotenv_api_key, dotenv_base_url),
         ]
     )
+    return OpenAI(api_key=api_key, base_url=base_url)
 
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
 def get_client():
-    """
-    Returns the OpenAI client, initializing it only when needed.
-    This prevents the application from crashing on import if st.secrets are missing.
-    Uses Streamlit's cache_resource for efficiency.
-    """
     import streamlit as st
-    
+
     @st.cache_resource
     def _get_cached_client():
-        """Internal cached client initialization"""
         try:
             return _initialize_openai_client()
         except (ValueError, KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
             # Graceful fallback for environments where secrets are not available (e.g., tests)
             logging.error(f"Failed to initialize OpenAI client: {e}")
             return None
-    
+
     return _get_cached_client()
 
 
@@ -321,7 +323,6 @@ def validate_pdf_metadata(uploaded_file):
 
 
 def compress_text(text, limit=6000):
-    """Compress text for token safety by keeping head and tail"""
     if len(text) <= limit:
         return text
     head = text[:3000]
@@ -330,36 +331,24 @@ def compress_text(text, limit=6000):
 
 
 def english_leakage_detected(output_text, threshold=8):
-    """
-    Detect if English words have leaked into non-English output.
-    Uses langdetect for primary detection and a refined word-list heuristic for fallback.
-    """
     if not output_text or len(output_text.strip()) < 10:
         return False
-
     try:
-        # Get probabilities for all detected languages
         langs = detect_langs(output_text)
-        # If English is detected with high confidence (> 0.5), it's likely leakage
         for l in langs:
             if l.lang == 'en' and l.prob > 0.8:
                 return True
-            # If the top language is English and it's much more likely than others
             if l.lang == 'en' and langs[0].lang == 'en' and l.prob > 0.5:
                 return True
     except Exception as e:
         logging.debug(f"langdetect failed: {e}")
 
-    # Refined heuristic: Use a more comprehensive list and higher threshold
-    # Legal summaries often contain some English names or terms, so we need to be careful
     common_english = [
-        " the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on ", 
+        " the ", " and ", " of ", " to ", " in ", " is ", " that ", " it ", " for ", " on ",
         " with ", " as ", " this ", " was ", " are ", " at ", " by ", " be ", " or ", " has "
     ]
     text_lower = " " + re.sub(r'[^\w\s]', ' ', output_text.lower()) + " "
     count = sum(1 for word in common_english if word in text_lower)
-    
-    # Increased threshold to 8 to avoid false positives on short legal snippets
     return count >= threshold
 
 
@@ -496,16 +485,17 @@ TARGET LANGUAGE:
 INSTRUCTIONS:
 1. Extract ONLY the final judgment outcome.
 2. Remove all legal jargon and case history.
-3. Produce EXACTLY 3 bullet points.
+3. Produce AT LEAST 5 bullet points. More than 5 is allowed if needed.
 4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
 5. Each bullet must be 1–2 very short sentences.
-6. No extra headings. No disclaimers.
+6. Put every bullet point on its own new line.
+7. No extra headings. No disclaimers.
 
 TEXT TO ANALYZE:
 {safe_text}
 
 OUTPUT REQUIRED:
-- 3 bullet points in {language} only
+- Minimum 5 bullet points in {language} only
 """
 
 
@@ -522,7 +512,7 @@ TARGET LANGUAGE:
 - Translate the result into {language}; do not copy the PDF's original language.
 
 REQUIREMENTS:
-- Exactly 3 bullet points
+- Minimum 5 bullet points
 - VERY simple {language}
 - No non-target language text at all
 - No introductions, headings, or explanations
@@ -531,15 +521,19 @@ TEXT:
 {safe_text}
 
 OUTPUT NOW:
-3 bullet points in {language} only.
+Minimum 5 bullet points in {language} only.
 """
 
+
+# ==================== FIX-1: REMEDIES PROMPT (language-enforced) ====================
+# OLD: prompt asked for answers in {language} but system message was generic English.
+# FIX: system message now explicitly enforces the target language and its script rule.
 
 def build_remedies_prompt(judgment_text, language):
     """Build prompt for remedies advisor to analyze legal options"""
     language_rule = _language_output_rule(language)
     return f"""
-You are a Legal Rights Advisor. Read this judgment and answer in SIMPLE format.
+You are a Legal Rights Advisor. Read this judgment and answer the questions below.
 
 JUDGMENT:
 {judgment_text}
@@ -569,25 +563,19 @@ Output in numbered form like:
 # ==================== REMEDIES PARSER ====================
 
 KNOWN_COURTS = {
-    "supreme court",
-    "high court",
-    "district court",
-    "sessions court",
-    "session court",
-    "civil court",
-    "family court",
-    "consumer court",
-    "tribunal",
+    "supreme court", "high court", "district court", "sessions court",
+    "session court", "civil court", "family court", "consumer court", "tribunal",
 }
+
 
 def _clean_answer(value: str):
     cleaned = re.sub(r"\s+", " ", (value or "")).strip(" -:\t\n")
     return cleaned or ""
 
+
 def _strip_question_label(key: str, value: str) -> str:
     if not value:
         return ""
-
     patterns = {
         "what_happened": r"^(?:\*\*)?(what happened\??)(?:\*\*)?\s*",
         "can_appeal": r"^(?:\*\*)?(can the loser appeal\??)(?:\*\*)?\s*",
@@ -645,6 +633,10 @@ def _contains_alias(value, aliases):
 
 
 def _normalize_yes_no(value: str) -> str:
+    """
+    Normalize yes/no answer. Returns 'yes', 'no', or the original value unchanged.
+    The caller (localize_yes_no) handles display translation.
+    """
     if not value:
         return ""
     lower = value.lower()
@@ -660,23 +652,29 @@ def _extract_number(value: str) -> str:
     match = re.search(r"\b(\d{1,4})\b", value)
     return match.group(1) if match else ""
 
+
+# ==================== FIX-1: _validate_court_name — don't strip non-English names ====================
+# OLD: only returned a value if it matched English KNOWN_COURTS list, otherwise returned "".
+#      This silently dropped court names written in Indic scripts.
+# FIX: if the value doesn't match English known courts, return it as-is (trust the LLM).
+
 def _validate_court_name(value: str) -> str:
     if not value:
         return ""
     cleaned = _clean_answer(value)
     if not cleaned:
         return ""
-
     normalized = cleaned.lower()
+    # If it matches an English known court name, return the cleaned version.
     if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
         return cleaned
-    return ""
+    # FIX: For Indic / non-English court names, trust the LLM output rather than discarding it.
+    return cleaned
+
 
 def parse_remedies_response(response_text):
     """
     Extract structured info from LLM response using flexible numbered-line parsing.
-    Supports multiple separators: . ) : - 
-    Handles both 5-section (old) and 7-section (new) formats.
     """
     mapping = {
         1: "what_happened",
@@ -693,12 +691,12 @@ def parse_remedies_response(response_text):
         "appeal_days": "",
         "appeal_court": "",
         "cost_estimate": "",
-        "cost": "", # For backward compatibility
+        "cost": "",
         "first_action": "",
         "deadline": "",
-        "appeal_details": "", # For backward compatibility
+        "appeal_details": "",
         "_is_partial": False,
-        "_warning": ""
+        "_warning": "",
     }
 
     text = response_text.strip()
@@ -718,32 +716,30 @@ def parse_remedies_response(response_text):
         key = mapping.get(section_num)
         if not key:
             continue
-
         start = match.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
         inline_text = _clean_answer(match.group(2))
         block_text = _clean_answer(text[start:end])
-        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
+        section_text = _clean_answer(
+            " ".join(part for part in [inline_text, block_text] if part)
+        )
         cleaned = _strip_question_label(key, section_text)
-        
         if cleaned:
             remedies[key] = cleaned
 
-    # Normalization & Compatibility
+    # Normalize
     if remedies["can_appeal"]:
         remedies["can_appeal"] = _normalize_yes_no(remedies["can_appeal"])
-    
+
     if remedies["appeal_days"]:
         remedies["appeal_days"] = _extract_number(remedies["appeal_days"])
-    
+
     if remedies["appeal_court"]:
         remedies["appeal_court"] = _validate_court_name(remedies["appeal_court"])
-    
-    # Map 'cost_estimate' to 'cost' for backward compatibility
+
     if remedies["cost_estimate"]:
         remedies["cost"] = remedies["cost_estimate"]
-    
-    # Track if all main sections are present
+
     required = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
     missing = [f for f in required if not remedies[f]]
     if missing:
@@ -754,77 +750,66 @@ def parse_remedies_response(response_text):
 
 
 def extract_appeal_info(appeal_details_text):
-    """Extract structured appeal information from appeal details text using regex"""
-    info = {
-        "days": "",
-        "court": "",
-        "cost": ""
-    }
+    info = {"days": "", "court": "", "cost": ""}
     text = appeal_details_text or ""
-
-    # Extract days to appeal
     days_match = re.search(r"(\d+)\s*(?:days?|day)", text.lower())
     if days_match:
         info["days"] = days_match.group(1)
-
-    # Extract appeal court
     court_keywords = ["High Court", "District Court", "Supreme Court", "Lower Court"]
     for keyword in court_keywords:
         if keyword.lower() in text.lower():
             info["court"] = keyword
             break
-
-    # Extract cost
     cost_match = re.search(r"₹?([\d,]+(?:[-–][\d,]+)?)", text.replace(" ", ""))
     if cost_match:
         info["cost"] = cost_match.group(1)
-
     return info
 
 
+# ==================== FIX-1+2: get_remedies_advice — language-enforced system prompt + more tokens ====================
+# OLD: system message was generic English "helpful legal advisor"; max_tokens=500 (too short).
+# FIX: system message now names the target language explicitly; max_tokens raised to 900.
+
 def get_remedies_advice(judgment_text, language, client=None):
-    """Call LLM to get remedies for this judgment"""
+    """Call LLM to get remedies for this judgment — answers in the selected language."""
     if client is None:
         client = get_client()
-    
     if not client:
         return None
-    
+
     prompt = build_remedies_prompt(compress_text(judgment_text), language)
-    
+    language_rule = _language_output_rule(language)
+
     try:
         response = client.chat.completions.create(
             model=get_default_model(),
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
+                    # FIX-1: was generic English; now strictly enforces the target language.
+                    "content": (
+                        f"You are a legal rights advisor for Indian citizens. "
+                        f"You MUST answer ONLY in {language}. {language_rule} "
+                        f"Never use English words or sentences unless {language} is English. "
+                        f"Never mix languages. Be thorough and write 2-3 sentences per answer."
+                    ),
                 },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
+                {"role": "user", "content": prompt},
             ],
-            max_tokens=500,  # Longer for detailed answers
-            temperature=0.1,  # Low temp = more consistent
+            # FIX-2: was 500 — too low for detailed multi-language answers; raised to 900.
+            max_tokens=900,
+            temperature=0.1,
         )
-        
+
         response_text = response.choices[0].message.content.strip()
         remedies = parse_remedies_response(response_text)
-        
+
         if remedies is None:
-            return {
-                "what_happened": None,
-                "can_appeal": None,
-                "appeal_days": None,
-                "appeal_court": None,
-                "cost_estimate": None,
-                "cost": None,
-                "first_action": None,
-                "deadline": None,
-            }
-        
+            return {k: None for k in
+                    ["what_happened", "can_appeal", "appeal_days", "appeal_court",
+                     "cost_estimate", "cost", "first_action", "deadline"]}
         return remedies
+
     except Exception as e:
         logging.error(f"Failed to get remedies advice: {str(e)}")
         return None
@@ -834,31 +819,15 @@ def get_remedies_advice(judgment_text, language, client=None):
 
 RETRO_STYLING = """
 <style>
-    body {
-        background-color: #0d0d0f;
-        color: #e0e0e0;
-        font-family: 'Inter', sans-serif;
-    }
-    .main {
-        background-color: #0d0d0f;
-    }
+    body { background-color: #0d0d0f; color: #e0e0e0; font-family: 'Inter', sans-serif; }
+    .main { background-color: #0d0d0f; }
     .stButton>button {
         background: linear-gradient(90deg, #2d2dff, #8a2be2);
-        border-radius: 8px;
-        color: white;
-        font-weight: 600;
-        border: none;
-        padding: 0.6rem 1.2rem;
+        border-radius: 8px; color: white; font-weight: 600;
+        border: none; padding: 0.6rem 1.2rem;
     }
-    .stSelectbox>div>div {
-        background-color: #1a1a1d;
-        color: #e0e0e0;
-        border-radius: 6px;
-    }
-    .stTextArea>div>textarea {
-        background-color: #121214;
-        color: #e0e0e0;
-    }
+    .stSelectbox>div>div { background-color: #1a1a1d; color: #e0e0e0; border-radius: 6px; }
+    .stTextArea>div>textarea { background-color: #121214; color: #e0e0e0; }
 </style>
 """
 

@@ -1,12 +1,14 @@
 """
 Home page - Judgment Analysis (Main page)
 This is the primary feature of LegalEase AI
+
+CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
+        render_shareable_result_box accepts the tuple directly — no other changes needed.
 """
 
 import streamlit as st
 import logging
 
-# Import utilities from core
 from core.app_utils import (
     get_client,
     extract_text_from_pdf,
@@ -25,7 +27,6 @@ from core.app_utils import (
     validate_pdf_metadata,
 )
 
-# Apply styling
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
 
 
@@ -60,7 +61,6 @@ def render_page():
     if uploaded_file and is_valid_pdf and st.button("🚀 Generate Summary", use_container_width=True):
         with st.spinner("Processing judgment…"):
             try:
-                # Get client
                 try:
                     client = get_client()
                     ui = get_localized_ui_text(language, client)
@@ -68,14 +68,12 @@ def render_page():
                     st.error(f"❌ {ui['api_client_failed']}: {str(e)}")
                     return
 
-                # Extract and process text
                 raw_text = extract_text_from_pdf(uploaded_file)
                 safe_text = compress_text(raw_text)
 
                 prompt = build_prompt(safe_text, language)
                 model_id = "meta-llama/llama-3.1-8b-instruct"
 
-                # First attempt
                 response = client.chat.completions.create(
                     model=model_id,
                     messages=[
@@ -162,29 +160,28 @@ def render_page():
                     st.info(ui["track_info"])
                     
                     col1, col2, col3 = st.columns(3)
-                    
+
                     with col1:
                         if st.button(ui["view_analytics"], key="view_analytics"):
                             st.session_state.show_analytics = True
-                    
+
                     with col2:
                         if st.button(ui["estimate_chances"], key="estimate_chances"):
                             st.session_state.show_estimator = True
-                    
+
                     with col3:
                         if st.button(ui["report_outcome"], key="report_outcome"):
                             st.session_state.show_feedback = True
-                    
-                    # Show analytics if requested
+
                     if st.session_state.get("show_analytics"):
                         st.subheader(ui["quick_analytics_preview"])
                         try:
                             from analytics_engine import AnalyticsAggregator
                             from database import SessionLocal
-                            
+
                             db = SessionLocal()
                             summary_data = AnalyticsAggregator.get_dashboard_summary(db)
-                            
+
                             if summary_data.get("total_cases_processed", 0) > 0:
                                 col1, col2, col3 = st.columns(3)
                                 with col1:

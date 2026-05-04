@@ -319,16 +319,17 @@ Convert the judgment text into a simple, citizen-friendly summary.
 INSTRUCTIONS:
 1. Extract ONLY the final judgment outcome.
 2. Remove all legal jargon and case history.
-3. Produce EXACTLY 3 bullet points.
+3. Produce AT LEAST 5 bullet points. More than 5 is allowed if needed.
 4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
 5. Each bullet must be 1–2 very short sentences.
-6. No extra headings. No disclaimers.
+6. Put every bullet point on its own new line.
+7. No extra headings. No disclaimers.
 
 TEXT TO ANALYZE:
 {safe_text}
 
 OUTPUT REQUIRED:
-- 3 bullet points in {language} only
+- Minimum 5 bullet points in {language} only
 """
 
 def build_retry_prompt(safe_text: str, language: str) -> str:
@@ -336,16 +337,17 @@ def build_retry_prompt(safe_text: str, language: str) -> str:
 Your previous answer included English. Now STRICTLY produce the answer ONLY in {language}.
 
 REQUIREMENTS:
-- Exactly 3 bullet points
+- Minimum 5 bullet points
 - VERY simple {language}
 - No English at all
+- Put every bullet point on its own new line
 - No introductions, headings, or explanations
 
 TEXT:
 {safe_text}
 
 OUTPUT NOW:
-3 bullet points in {language} only.
+Minimum 5 bullet points in {language} only.
 """
 
 def build_remedies_prompt(judgment_text: str, language: str) -> str:

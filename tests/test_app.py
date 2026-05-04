@@ -111,7 +111,7 @@ def test_all_languages_prompt_building(language):
     """Test prompt building for all supported languages"""
     prompt = core.build_summary_prompt("Sample text", language)
     assert language in prompt
-    assert "3 bullet points" in prompt
+    assert "bullet points" in prompt
 
 @patch("core.app_utils.get_client")
 def test_get_remedies_advice_flow(mock_get_client):
@@ -154,7 +154,7 @@ def test_judgment_summary_quality_manual():
     """
     # Just check if our prompt asks for 3 bullets
     prompt = core.build_summary_prompt("test", "Hindi")
-    assert "EXACTLY 3 bullet points" in prompt
+    assert "AT LEAST 5 bullet points" in prompt
 
 if __name__ == "__main__":
     pytest.main([__file__])
