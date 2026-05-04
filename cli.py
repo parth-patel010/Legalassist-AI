@@ -88,7 +88,8 @@ def get_client() -> OpenAI:
     api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise CLIError(
-            "Missing API key. Set OPENROUTER_API_KEY (preferred) or OPENAI_API_KEY in your environment."
+            "Missing API key. Set OPENROUTER_API_KEY (preferred) or OPENAI_API_KEY in your environment. "
+            "You can also add these to your .env file."
         )
 
     base_url = os.getenv("OPENROUTER_BASE_URL", DEFAULT_BASE_URL)
@@ -694,9 +695,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
     # Configure structured logging and rich output
     try:
         configure_logging()

@@ -57,7 +57,7 @@ class CaseDeadline(Base):
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-    is_completed = Column(Boolean, default=False)
+    is_completed = Column(Boolean, default=False, index=True)
 
     # Relationships
     case = relationship("Case", back_populates="deadlines")
